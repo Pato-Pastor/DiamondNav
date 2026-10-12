@@ -12,7 +12,7 @@ Run `dnav.py <command> --help` for each. A typical bake of the whole map:
     python3 tools/dnav.py roads --gta "C:/Games/GTA San Andreas" navmesh/roads.dnr
 
 and the server loads everything in its navmesh/ folder at start.
-Needs Python 3.9+ and numpy (and Pillow for previews).
+Needs Python 3.9+; world also needs numpy, preview Pillow. roads needs nothing else.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dnavlib import gta, preview, roads, world  # noqa: E402
+from dnavlib import gta, roads  # noqa: E402  (world and preview need numpy: imported when used)
 
 
 def area_arg(v):
@@ -35,6 +35,7 @@ def area_arg(v):
 
 
 def cmd_world(a):
+    from dnavlib import world
     rep = world.build(a.out, gta_dir=a.gta, cadb_path=a.colandreas, maps=a.map or [], model_dirs=a.models or [],
                       area=a.area, water_dat=a.water)
     for line in rep.lines():
@@ -63,6 +64,7 @@ def cmd_roads(a):
 
 
 def cmd_preview(a):
+    from dnavlib import preview
     p = a.prefix
     preview.draw(a.out, p.with_suffix(".polys.obj") if p else None, p.with_suffix(".paths.txt") if p else None,
                  a.roads, a.scale)
@@ -74,7 +76,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="dnav.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    w = sub.add_parser("world", help="build the world's collision for navbake", description=world.__doc__,
+    w = sub.add_parser("world", help="build the world's collision for navbake",
+                       description="Build the world's collision for navbake (dnavlib/world.py says more).",
                        formatter_class=argparse.RawDescriptionHelpFormatter)
     w.add_argument("out", type=Path, help="output prefix: writes OUT.tris, OUT.seeds.txt, OUT.water.txt")
     w.add_argument("--gta", type=Path, help="a GTA San Andreas folder (the one players use is best)")
