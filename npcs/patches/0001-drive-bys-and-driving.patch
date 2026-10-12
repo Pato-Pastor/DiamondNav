@@ -1,0 +1,255 @@
+diff --git a/Server/Components/NPCs/NPC/npc.cpp b/Server/Components/NPCs/NPC/npc.cpp
+index 0fc070e..00464a1 100644
+--- a/Server/Components/NPCs/NPC/npc.cpp
++++ b/Server/Components/NPCs/NPC/npc.cpp
+@@ -443,7 +443,31 @@ bool NPC::move(Vector3 pos, NPCMoveType moveType, float moveSpeed, float stopRan
+ 	{
+ 		front = (pos - position) / distance;
+ 		auto rotation = getRotation().ToEuler();
++		float previousAngle = rotation.z;
+ 		rotation.z = getAngleOfLine(front.x, front.y);
++
++		if (moveType_ == NPCMoveType_Drive)
++		{
++			// DiamondNav: pitch the car along the slope (GTAQuat negates Euler angles
++			// internally, matching the negative slope pitch; upstream master does the same)
++			// and turn the front wheels toward the new heading. GTA headings grow
++			// counter-clockwise, so a positive change is a left turn (LEFT = -128).
++			rotation.x = glm::degrees(atan2(front.z, glm::length(glm::vec2(front))));
++			rotation.y = 0.0f;
++
++			float turn = rotation.z - previousAngle;
++			while (turn > 180.0f)
++			{
++				turn -= 360.0f;
++			}
++			while (turn < -180.0f)
++			{
++				turn += 360.0f;
++			}
++			int steer = static_cast<int>(-turn * 6.0f);
++			steer = steer > 128 ? 128 : (steer < -128 ? -128 : steer);
++			leftAndRight_ = static_cast<uint16_t>(static_cast<int16_t>(steer));
++		}
+ 		rotation_ = GTAQuat(rotation); // Do this directly, if you use NPC::setRotation it's going to cause recursion
+ 
+ 		// Calculate velocity to use on tick
+@@ -498,6 +522,7 @@ void NPC::stopMove()
+ 	}
+ 
+ 	upAndDown_ &= ~Key::UP;
++	leftAndRight_ = 0; // DiamondNav: straighten the wheels of a car that stops
+ 	removeKey(Key::SPRINT);
+ 	removeKey(Key::WALK);
+ 	footSync_.UpDown = 0;
+@@ -1175,6 +1200,7 @@ void NPC::aimAt(const Vector3& point, bool shoot, int shootDelay, bool setAngle,
+ 	// Set keys
+ 	applyKey(Key::AIM);
+ 	aiming_ = true;
++	updateDriveByKeys();
+ 
+ 	// Set the shoot delay
+ 	auto updateRate = npcComponent_->getGeneralNPCUpdateRate();
+@@ -1229,6 +1255,8 @@ void NPC::stopAim()
+ 	// Reset keys
+ 	removeKey(Key::AIM);
+ 	removeKey(Key::FIRE);
++	removeKey(Key::LOOK_LEFT); // DiamondNav: a driver's drive-by look
++	removeKey(Key::LOOK_RIGHT);
+ }
+ 
+ bool NPC::isAiming() const
+@@ -1985,6 +2013,12 @@ void NPC::updateAim()
+ 		{
+ 			aimSync_.CamMode = 53;
+ 		}
++
++		// DiamondNav: a passenger's drive-by camera (MODE_AIMWEAPON_FROMCAR)
++		if (isInVehicle() && vehicleSeat_ != 0)
++		{
++			aimSync_.CamMode = 55;
++		}
+ 	}
+ 	else
+ 	{
+@@ -2043,7 +2077,7 @@ void NPC::updateAimData(const Vector3& point, bool setAngle)
+ 	// Get the destination angle
+ 	camVecDistance /= camDistance;
+ 
+-	if (setAngle)
++	if (setAngle && !isInVehicle()) // DiamondNav: a driver's rotation is the car's
+ 	{
+ 		auto rotation = getRotation().ToEuler();
+ 
+@@ -2148,9 +2182,17 @@ void NPC::sendDriverSync()
+ 	getKeys(upAndDown, leftAndRight, keys);
+ 
+ 	uint16_t vehicleID = vehicle_->getID();
++	Vector3 syncVelocity = velocity_;
++	if (moving_ && moveType_ == NPCMoveType_Drive)
++	{
++		// DiamondNav (as upstream master): advance() keeps the speed in units per
++		// millisecond, driver sync carries GTA's units per 20 ms physics step. Without
++		// this, clients see the car 20 times slower than it moves and it stutters.
++		syncVelocity *= 20.0f;
++	}
+ 
+ 	// Check if immediate update is needed (basic comparison for now)
+-	bool needsImmediateUpdate = driverSync_.LeftRight != leftAndRight || driverSync_.UpDown != upAndDown || driverSync_.Keys != keys || driverSync_.Position != position_ || driverSync_.Rotation.q != rotation_.q || driverSync_.PlayerHealthArmour.x != health_ || driverSync_.PlayerHealthArmour.y != armour_ || driverSync_.VehicleID != vehicleID || driverSync_.Velocity != velocity_ || driverSync_.Health != vehicleHealth_;
++	bool needsImmediateUpdate = driverSync_.LeftRight != leftAndRight || driverSync_.UpDown != upAndDown || driverSync_.Keys != keys || driverSync_.Position != position_ || driverSync_.Rotation.q != rotation_.q || driverSync_.PlayerHealthArmour.x != health_ || driverSync_.PlayerHealthArmour.y != armour_ || driverSync_.VehicleID != vehicleID || driverSync_.Velocity != syncVelocity || driverSync_.Health != vehicleHealth_;
+ 
+ 	auto generateDriverSyncBitStream = [&](NetworkBitStream& bs)
+ 	{
+@@ -2162,7 +2204,7 @@ void NPC::sendDriverSync()
+ 		driverSync_.Rotation = rotation_;
+ 		driverSync_.PlayerHealthArmour.x = health_;
+ 		driverSync_.PlayerHealthArmour.y = armour_;
+-		driverSync_.Velocity = velocity_;
++		driverSync_.Velocity = syncVelocity;
+ 		driverSync_.Health = vehicleHealth_;
+ 
+ 		driverSync_.Siren = uint8_t(useVehicleSiren_);
+@@ -2239,7 +2281,10 @@ void NPC::sendPassengerSync()
+ 	uint16_t vehicleID = vehicle_->getID();
+ 
+ 	// Check if immediate update is needed (basic comparison for now)
+-	bool needsImmediateUpdate = passengerSync_.LeftRight != leftAndRight || passengerSync_.UpDown != upAndDown || passengerSync_.Keys != keys || passengerSync_.Position != position_ || passengerSync_.HealthArmour.x != health_ || passengerSync_.HealthArmour.y != armour_ || passengerSync_.VehicleID != vehicleID || passengerSync_.SeatID != vehicleSeat_ || passengerSync_.WeaponID != weapon_;
++	// DiamondNav: the drive-by bit makes other players see the passenger lean out.
++	uint8_t driveBy = (aiming_ && canDriveBy()) ? 1 : 0;
++
++	bool needsImmediateUpdate = passengerSync_.LeftRight != leftAndRight || passengerSync_.UpDown != upAndDown || passengerSync_.Keys != keys || passengerSync_.Position != position_ || passengerSync_.HealthArmour.x != health_ || passengerSync_.HealthArmour.y != armour_ || passengerSync_.VehicleID != vehicleID || passengerSync_.SeatID != vehicleSeat_ || passengerSync_.WeaponID != weapon_ || passengerSync_.DriveBy != driveBy;
+ 
+ 	auto generatePassengerSyncBitStream = [&](NetworkBitStream& bs)
+ 	{
+@@ -2252,6 +2297,7 @@ void NPC::sendPassengerSync()
+ 		passengerSync_.HealthArmour.y = armour_;
+ 		passengerSync_.SeatID = vehicleSeat_;
+ 		passengerSync_.WeaponID = weapon_;
++		passengerSync_.DriveBy = driveBy;
+ 
+ 		bs.writeUINT8(passengerSync_.PacketID);
+ 		bs.writeUINT16(passengerSync_.VehicleID);
+@@ -2288,8 +2334,8 @@ void NPC::sendPassengerSync()
+ 
+ void NPC::sendAimSync()
+ {
+-	// Only send aim sync if player is on foot
+-	if (player_->getState() != PlayerState_OnFoot)
++	// Only send aim sync if player is on foot, or (DiamondNav) aiming from a car
++	if (player_->getState() != PlayerState_OnFoot && !(aiming_ && canDriveBy()))
+ 	{
+ 		return;
+ 	}
+@@ -2680,6 +2726,13 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+ 						advance(now);
+ 					}
+ 
++					// DiamondNav: a passenger rides along. Without this its position stays
++					// where it got in, so its shots start there and it streams out.
++					if (state == PlayerState_Passenger && vehicle_)
++					{
++						position_ = vehicle_->getPosition();
++					}
++
+ 					if (state == PlayerState_OnFoot)
+ 					{
+ 						if (surfingData_.type != PlayerSurfingData::Type::None)
+@@ -2750,7 +2803,12 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+ 								vehicleSeatToEnter_ = SEAT_NONE;
+ 							}
+ 						}
++					}
+ 
++					// DiamondNav: aiming, reloading and shooting also run in a car that
++					// allows a drive-by (canDriveBy); melee stays on foot.
++					if (state == PlayerState_OnFoot || canDriveBy())
++					{
+ 						if (aiming_)
+ 						{
+ 							auto player = npcComponent_->getCore()->getPlayers().get(hitId_);
+@@ -2852,7 +2910,7 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+ 								}
+ 							}
+ 						}
+-						else if (meleeAttacking_)
++						else if (meleeAttacking_ && state == PlayerState_OnFoot)
+ 						{
+ 							if (duration_cast<Milliseconds>(lastUpdate_ - shootUpdateTime_) >= meleeAttackDelay_)
+ 							{
+@@ -2879,6 +2937,8 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+ 								}
+ 							}
+ 						}
++
++						updateDriveByKeys();
+ 					}
+ 
+ 					if (exitingVehicle_ && duration_cast<Milliseconds>(now - vehicleEnterExitUpdateTime_).count() > (1500))
+@@ -3122,3 +3182,51 @@ void NPC::resetSurfingData()
+ 	surfingData_.ID = 0;
+ 	surfingData_.type = PlayerSurfingData::Type::None;
+ }
++
++// DiamondNav: drive-bys (components/npcs/patches/0001-drive-bys-and-driving.patch).
++
++bool NPC::canDriveBy() const
++{
++	if (!isInVehicle())
++	{
++		return false;
++	}
++
++	if (WeaponInfo::get(weapon_).type != PlayerWeaponType_Bullet)
++	{
++		return false;
++	}
++
++	if (vehicleSeat_ == 0)
++	{
++		// GTA lets a driver fire only the sub-machine guns, sideways.
++		return weapon_ == PlayerWeapon_UZI || weapon_ == PlayerWeapon_MP5 || weapon_ == PlayerWeapon_TEC9;
++	}
++
++	// Passengers: any bullet weapon short of the heavy and sniper slots.
++	return weapon_ != PlayerWeapon_Sniper && weapon_ != PlayerWeapon_Minigun;
++}
++
++void NPC::updateDriveByKeys()
++{
++	if (!isInVehicle() || vehicleSeat_ != 0)
++	{
++		return;
++	}
++
++	// A driver: no aim key (in a car it is the handbrake). Look toward the target's side
++	// of the car instead, which is how GTA aims a driver's drive-by.
++	removeKey(Key::AIM);
++	removeKey(Key::LOOK_LEFT);
++	removeKey(Key::LOOK_RIGHT);
++	if (!aiming_ || !canDriveBy())
++	{
++		return;
++	}
++
++	float heading = glm::radians(getRotation().ToEuler().z);
++	Vector3 toTarget = aimAt_ - getPosition();
++	// GTA's forward for heading h is (-sin h, cos h); its right is (cos h, sin h).
++	float side = toTarget.x * glm::cos(heading) + toTarget.y * glm::sin(heading);
++	applyKey(side >= 0.0f ? Key::LOOK_RIGHT : Key::LOOK_LEFT);
++}
+diff --git a/Server/Components/NPCs/NPC/npc.hpp b/Server/Components/NPCs/NPC/npc.hpp
+index 591545e..2d8ad96 100644
+--- a/Server/Components/NPCs/NPC/npc.hpp
++++ b/Server/Components/NPCs/NPC/npc.hpp
+@@ -282,6 +282,11 @@ public:
+ 
+ 	void advance(TimePoint now);
+ 
++	// DiamondNav: drive-bys (components/npcs/patches/0001)
++	bool canDriveBy() const;
++
++	void updateDriveByKeys();
++
+ 	IVehicle* getEnteringVehicle() override
+ 	{
+ 		return vehicleToEnter_;

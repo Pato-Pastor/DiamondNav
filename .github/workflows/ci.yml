@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+jobs:
+  linux:
+    name: Linux build, tests and a live server run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the 32-bit toolchain
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y g++-multilib cmake ninja-build python3-numpy python3-pil libstdc++6:i386 libssl3:i386
+
+      - name: Build DiamondNav
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32
+          cmake --build build
+
+      - name: Build the NPC component
+        run: |
+          cmake -S npcs -B build/npcs -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32
+          cmake --build build/npcs
+
+      - name: C++ tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Tool tests (with a bake)
+        run: python3 tools/tests/test_tools.py build
+
+      - name: Live server test
+        run: |
+          curl -fsSL -o omp.tar.gz https://github.com/openmultiplayer/open.mp/releases/download/v1.5.8.3079/open.mp-linux-x86-dynssl.tar.gz
+          echo "2be12550e3aaff0e60510ae8823e18b9759990eca3f02c101a49bcb3c985d222  omp.tar.gz" | sha256sum -c
+          mkdir omp && tar -xzf omp.tar.gz -C omp --strip-components=1
+          python3 tests/server/run.py omp build --npcs build/npcs/NPCs.so
+
+      - name: Compile the examples
+        run: |
+          for f in examples/*.pwn; do
+            (cd omp/qawno && ./pawncc "$GITHUB_WORKSPACE/$f" -i./include -i"$GITHUB_WORKSPACE/include" -o/tmp/out.amx "-;+" "-(+")
+          done
+
+      - name: Package
+        run: python3 scripts/package.py build build/npcs dist linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DiamondNav-linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows build and tests
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build DiamondNav (Win32, ClangCL)
+        run: |
+          cmake -S . -B build -A Win32 -T ClangCL
+          cmake --build build --config Release --parallel
+
+      - name: Build the NPC component
+        run: |
+          cmake -S npcs -B build/npcs -A Win32 -T ClangCL
+          cmake --build build/npcs --config Release --parallel
+
+      - name: C++ tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Tool tests (with a bake)
+        run: |
+          python -m pip install numpy pillow
+          python tools/tests/test_tools.py build/Release
+
+      - name: Package
+        run: python scripts/package.py build build/npcs dist windows
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DiamondNav-windows
+          path: dist/*.zip
+          if-no-files-found: error
