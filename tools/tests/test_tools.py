@@ -76,7 +76,7 @@ end
     a1 = fg.nodes_dat(
         [(YX + 100, YY + 60, YZ)],
         {0: [(0, 2)]},
-        navi=[(YX + 100, YY + 10, 0, 2, 0.0, 1.0, 0, 1, 0)],
+        navi=[(YX + 100, YY + 10, 0, 2, 0.0, 1.0, 1, 0, 0)],          # one lane along the direction
         navi_of={0: [(1, 0)]})
     fg.write_img(root / "models" / "gta3.img", {
         "yard.col": ground + wall,

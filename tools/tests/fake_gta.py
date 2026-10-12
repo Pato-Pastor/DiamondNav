@@ -97,8 +97,8 @@ def binary_ipl(rows):
 
 def nodes_dat(vehicle, links_of, navi=(), navi_of=None, ped=()):
     """A nodes<N>.dat. vehicle and ped: (x, y, z[, flags]); links_of[i]: [(area, node)]
-    for node i (vehicle first, then ped); navi: (x, y, area, node, dirx, diry, left,
-    right, width); navi_of[i]: the (area, navi id) of each of node i's links."""
+    for node i (vehicle first, then ped); navi: (x, y, area, node, dirx, diry, left
+    (lanes along dir), right, width); navi_of[i]: the (area, navi id) of each of node i's links."""
     allnodes = list(vehicle) + list(ped)
     links, navilinks, rows = [], [], []
     for i, n in enumerate(allnodes):

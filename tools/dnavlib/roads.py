@@ -175,11 +175,14 @@ def from_gta(files: dict[str, bytes]) -> Graph:
                     left, right = (f >> 8) & 7, (f >> 11) & 7
                     if left or right:
                         o = g.nodes[other]
-                        # Right-hand lanes run along the navi node's direction.
+                        # The "left" lanes run along the navi node's direction.
+                        # Checked on the real map: this way round, 92% of split
+                        # carriageways have the opposite one on the driver's left,
+                        # as they must where traffic keeps right.
                         if dx * (o.x - x) + dy * (o.y - y) >= 0:
-                            ab, ba = right, left
-                        else:
                             ab, ba = left, right
+                        else:
+                            ab, ba = right, left
                     median = (f & 0xFF) / 8.0
                 g.link(me, other, ab, ba, median)
     return g
