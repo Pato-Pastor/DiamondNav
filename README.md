@@ -166,9 +166,9 @@ car with the Infernus's line tops out at 221 km/h, as measured in the game (222)
 not handling.cfg's 240.
 
 Without it every car drives as the same average car. To check a model against the
-real game, drive it yourself with a timer (Diamond City's `/navtest measure` shows
-its top speed, 0-100 km/h, braking and cornering next to these), and if one is off,
-set it from your script with `Nav_SetVehicleHandling`.
+real game, drive it yourself with a script that times your top speed, 0-100 km/h,
+braking and cornering next to `Nav_GetVehicleInfo`'s numbers, and if one is off, set
+it from your script with `Nav_SetVehicleHandling`.
 
 ### Checking a bake
 
