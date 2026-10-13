@@ -92,6 +92,9 @@ public:
     // Whether the mesh goes straight from `from` to `to` with no wall or drop in
     // between (both on the ground). False when either end is off the mesh.
     bool lineClear(const Point& from, const Point& to, MeshKind k = MeshKind::Ped) const;
+    // The mesh's ground height under (x, y), nearest to z within `reach` metres up or
+    // down. False off the mesh.
+    bool groundAt(float x, float y, float z, float reach, float& out, MeshKind k = MeshKind::Ped) const;
 
     // The search itself; any thread with its own query on the right mesh.
     PathResult find(dtNavMeshQuery& q, const PathRequest& r) const;

@@ -186,8 +186,10 @@ rcConfig baseConfig()
     c.borderSize = c.walkableRadius + 3;
     c.width = c.tileSize + c.borderSize * 2;
     c.height = c.tileSize + c.borderSize * 2;
-    c.detailSampleDist = c.cs * 6.0f;
-    c.detailSampleMaxError = c.ch * 1.0f;
+    // A car's mesh carries its height for the car to sit on: sample it every 2 m and
+    // keep it within 10 cm of the ground, or cars float over bumps between samples.
+    c.detailSampleDist = g_kind == MeshKind::Car ? 2.0f : c.cs * 6.0f;
+    c.detailSampleMaxError = g_kind == MeshKind::Car ? 0.1f : c.ch * 1.0f;
     return c;
 }
 

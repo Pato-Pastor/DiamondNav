@@ -38,6 +38,27 @@ constexpr float WALK_STOP = 0.4f;               // how near a walking point coun
 constexpr float DRIVE_STOP = 1.5f;
 constexpr float DRIVE_MIN_SPEED = 0.25f;        // NPC_MOVE_TYPE_DRIVE speed floor in corners
 
+// Driving: the component steers the car itself, like a driver, instead of sliding it
+// from point to point. Every DRIVE_TICK it looks a little way down the path, turns
+// toward that point no faster than the car could, speeds up or brakes gently, and
+// hands NPC_Move a target just ahead, on the ground.
+// NPC_Move restarts the NPC's clock, so a move sent between two NPC updates loses the
+// time since the last one: drive() runs right after each NPC update instead (the
+// NPC's position changed), or after DRIVE_IDLE when it stands still.
+constexpr auto DRIVE_IDLE = std::chrono::milliseconds(120);
+constexpr float SPEED_UNIT = 10.0f;     // m/s per NPC_MOVE_TYPE_DRIVE speed 1.0
+constexpr float ACCEL = 4.0f;           // m/s per second
+constexpr float BRAKE = 7.0f;
+constexpr float TURN_RADIUS = 6.5f;     // the tightest circle the car drives, metres
+constexpr float TURN_MIN_SPEED = 3.0f;  // never slower than this while it still has to turn
+constexpr float LOOK_MIN = 4.0f;        // how far down the path it aims: 4 m at a crawl...
+constexpr float LOOK_TIME = 0.6f;       // ...plus 0.6 s of travel
+constexpr float LOOK_MAX = 16.0f;
+constexpr float AHEAD_TIME = 0.5f;      // NPC_Move's target: this far ahead of the car
+constexpr float AHEAD_MIN = 3.0f;
+constexpr float ARRIVE = 2.5f;          // a drive ends this near its last point
+constexpr float GROUND_REACH = 3.0f;    // how far up or down the car mesh's ground is looked for
+
 // Nav_Chase.
 constexpr auto CHASE_THINK = std::chrono::milliseconds(250);   // how often a chaser looks at its target
 constexpr auto CHASE_REPLAN_AFTER = std::chrono::seconds(6);   // a plan this old is redone anyway
@@ -50,7 +71,8 @@ constexpr float CHASE_REPLAN = 10.0f;       // re-plan once the target is this f
 constexpr float CHASE_REPLAN_SHARE = 0.2f;  // ...or a fifth of the way to it, if more
 constexpr float CHASE_ON_ROAD = 15.0f;      // a target this near a road node is on the road
 constexpr float CHASE_LEAD = 25.0f;         // aims where the target will be in 0.5 s (velocity is ~50 m/s per unit)
-constexpr float CHASE_SKIP = 4.0f;          // a new plan's points this near the car are already passed
+constexpr float CHASE_OFFROAD_RANGE = 200.0f; // with a car mesh, nearer than this the chase goes straight across it
+constexpr float CHASE_GROUND_STEP = 4.0f;   // a straight run samples the ground this often
 
 // OnNavMoveEnd's reasons (DiamondNav.inc).
 enum MoveEnd : int {
@@ -81,6 +103,15 @@ struct Mover {
     std::vector<float> speeds;
     size_t next = 0;
     Vector3 target {};
+
+    // Driving (drive()): the path segment the car is on, its speed and heading.
+    size_t seg = 0;
+    float v = 0.0f;                     // m/s
+    float heading = 0.0f;               // degrees, GTA's
+    bool rolling = false;               // speed and heading are the car's own
+    bool ground = false;                // read the height off the car mesh as it goes
+    TimePoint lastDrive {};
+    Vector3 lastPos {};                 // the NPC's position at the last drive()
 
     // Nav_Chase: the car follows a player until Nav_Stop. It re-plans as the target
     // moves and keeps driving the old plan until the new one comes back.
@@ -175,6 +206,17 @@ public:
             auto it = movers_.find(id);
             if (it != movers_.end()) think(id, it->second, now);
         }
+        // Drivers steer (ids first: arriving ends a drive).
+        thinking_.clear();
+        for (const auto& [id, m] : movers_) {
+            if (!driving(m.kind) || m.request || (!m.chase && m.points.empty())) continue;
+            INPC* npc = npcs_ ? npcs_->get(id) : nullptr;
+            if (!npc || npc->getPosition() != m.lastPos || now - m.lastDrive >= DRIVE_IDLE) thinking_.push_back(id);
+        }
+        for (int id : thinking_) {
+            auto it = movers_.find(id);
+            if (it != movers_.end()) drive(id, it->second, now);
+        }
 
         fresh_.clear();
         finder.takeResults(fresh_);
@@ -267,11 +309,182 @@ public:
             end(npcid, END_NO_PATH, false);
             return;
         }
-        const float lift = driving(m.kind) ? m.carZ : FOOT_Z;
-        for (const auto& p : r.points) m.points.push_back(Vector3(p.x, p.y, p.z + lift));
-        m.speeds = r.speeds;
+        if (driving(m.kind)) {
+            setDrivePath(npcid, m, r);
+            return;
+        }
+        for (const auto& p : r.points) m.points.push_back(Vector3(p.x, p.y, p.z + FOOT_Z));
         m.next = 0;
         step(npcid, m);
+    }
+
+    // A driver's new path: from where the car is now along the search's points. The
+    // car keeps its speed and heading.
+    void setDrivePath(int npcid, Mover& m, const dnav::PathResult& r)
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        IVehicle* car = npc ? npc->getVehicle() : nullptr;
+        if (!car) {
+            end(npcid, END_INTERRUPTED, false);
+            return;
+        }
+        m.points.clear();
+        m.speeds.clear();
+        m.points.push_back(car->getPosition());
+        m.speeds.push_back(1.0f);
+        for (size_t i = 0; i < r.points.size(); i++) {
+            const auto& p = r.points[i];
+            m.points.push_back(Vector3(p.x, p.y, p.z + m.carZ));
+            m.speeds.push_back(i < r.speeds.size() ? r.speeds[i] : 1.0f);
+        }
+        m.seg = 0;
+        m.ground = r.kind == dnav::PathKind::OffRoad && finder.meshLoaded(dnav::MeshKind::Car);
+    }
+
+    static float wrap180(float a)
+    {
+        while (a > 180.0f) a -= 360.0f;
+        while (a < -180.0f) a += 360.0f;
+        return a;
+    }
+
+    // The point `d` metres along the path from segment `seg` at fraction `t`.
+    static Vector3 along(const std::vector<Vector3>& pts, size_t seg, float t, float d)
+    {
+        Vector3 at = pts[seg] + (pts[seg + 1] - pts[seg]) * t;
+        for (size_t i = seg; i + 1 < pts.size(); i++) {
+            const Vector3 to = pts[i + 1];
+            const float len = glm::distance(Vector2(at), Vector2(to));
+            if (d <= len) return len > 1e-4f ? at + (to - at) * (d / len) : to;
+            d -= len;
+            at = to;
+        }
+        return pts.back();
+    }
+
+    // One step of driving (DRIVE_TICK): steer toward a point down the path, no faster
+    // than the car turns; ease the speed toward what the path allows; move.
+    void drive(int npcid, Mover& m, TimePoint now)
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        IVehicle* car = npc ? npc->getVehicle() : nullptr;
+        if (!npc || !car || npc->getVehicleSeat() != 0) {
+            end(npcid, END_INTERRUPTED, false);
+            return;
+        }
+        float dt = std::chrono::duration<float>(now - m.lastDrive).count();
+        m.lastDrive = now;
+        const Vector3 pos = npc->getPosition();
+        m.lastPos = pos;
+        if (!m.rolling) {
+            m.heading = car->getRotation().ToEuler().z;
+            m.v = 0.0f;
+            m.rolling = true;
+            dt = 0.05f;
+        }
+        dt = std::clamp(dt, 0.0f, 0.25f);
+
+        float target = 0.0f, error = 0.0f, remaining = 0.0f;
+        Vector3 ahead2;
+        const size_t n = m.points.size();
+        float aheadZ = pos.z;
+        if (n >= 2) {
+            // Where along the path the car is: the nearest point of the next few segments.
+            size_t best = m.seg;
+            float bestD = 1e30f, bestT = 0.0f;
+            for (size_t i = m.seg; i + 1 < n && i < m.seg + 8; i++) {
+                const Vector2 a(m.points[i]), b(m.points[i + 1]), p(pos);
+                const Vector2 ab = b - a;
+                const float len2 = glm::dot(ab, ab);
+                const float t = len2 > 1e-6f ? std::clamp(glm::dot(p - a, ab) / len2, 0.0f, 1.0f) : 1.0f;
+                const float d = glm::distance(p, a + ab * t);
+                if (d < bestD) {
+                    bestD = d;
+                    best = i;
+                    bestT = t;
+                }
+            }
+            m.seg = best;
+            const Vector3 at = m.points[best] + (m.points[best + 1] - m.points[best]) * bestT;
+            remaining = glm::distance(Vector2(at), Vector2(m.points[best + 1]));
+            for (size_t i = best + 1; i + 1 < n; i++)
+                remaining += glm::distance(Vector2(m.points[i]), Vector2(m.points[i + 1]));
+
+            if (!m.chase && remaining < ARRIVE) {
+                npc->stopMove();
+                end(npcid, END_ARRIVED, false);
+                return;
+            }
+
+            float look = std::clamp(LOOK_MIN + m.v * LOOK_TIME, LOOK_MIN, LOOK_MAX);
+            Vector3 aim = along(m.points, best, bestT, look);
+            // Off the road, never aim across a corner the car would clip: shorten the
+            // look until the car mesh says the straight line to it is clear.
+            if (m.ground) {
+                const dnav::Point from { pos.x, pos.y, pos.z - m.carZ };
+                while (look > 2.0f
+                    && !finder.lineClear(from, dnav::Point { aim.x, aim.y, aim.z - m.carZ }, dnav::MeshKind::Car)) {
+                    look *= 0.5f;
+                    aim = along(m.points, best, bestT, look);
+                }
+            }
+            const float want = glm::degrees(std::atan2(-(aim.x - pos.x), aim.y - pos.y));
+            error = wrap180(want - m.heading);
+
+            // The slowest the path asks for over the next stretch (corners, the end).
+            // Each corner ahead caps the speed at what still lets the car brake down to
+            // that corner's speed by the time it gets there.
+            const float cruise = m.speed * SPEED_UNIT;
+            target = cruise;
+            float dist = glm::distance(Vector2(at), Vector2(m.points[best + 1]));
+            for (size_t i = best + 1; i < n && dist < 80.0f; i++) {
+                if (i > best + 1) dist += glm::distance(Vector2(m.points[i - 1]), Vector2(m.points[i]));
+                if (i >= m.speeds.size()) continue;
+                const float corner = cruise * std::max(m.speeds[i], 0.2f);
+                target = std::min(target, std::sqrt(corner * corner + 2.0f * BRAKE * 0.6f * dist));
+            }
+            // Slow down to turn, but keep enough speed to get round.
+            const float abs = std::fabs(error);
+            if (abs > 15.0f) target *= std::max(0.3f, std::cos(glm::radians(std::min(abs, 75.0f))));
+            if (abs > 30.0f) target = std::max(target, TURN_MIN_SPEED);
+            // Brake to stop at the end.
+            target = std::min(target, std::sqrt(2.0f * BRAKE * 0.6f * std::max(0.0f, remaining - ARRIVE * 0.5f)));
+            ahead2 = Vector3(aim);
+        }
+
+        m.v += std::clamp(target - m.v, -BRAKE * dt, ACCEL * dt);
+        m.v = std::max(0.0f, m.v);
+        if (m.v < 0.3f && target < 0.3f) {
+            m.v = 0.0f;
+            if (npc->isMoving()) npc->stopMove();
+            return;
+        }
+        const float maxYaw = glm::degrees(std::max(m.v, TURN_MIN_SPEED * 0.5f) / TURN_RADIUS);
+        m.heading = wrap180(m.heading + std::clamp(error, -maxYaw * dt, maxYaw * dt));
+
+        // NPC_Move's target: straight ahead on the new heading, at the path's height (or
+        // the car mesh's ground under it).
+        const float reach = std::max(AHEAD_MIN, m.v * AHEAD_TIME);
+        const float h = glm::radians(m.heading);
+        Vector3 ahead(pos.x - std::sin(h) * reach, pos.y + std::cos(h) * reach, pos.z);
+        if (n >= 2) {
+            const Vector3 onPath = along(m.points, m.seg, 0.0f,
+                glm::distance(Vector2(m.points[m.seg]), Vector2(pos)) + reach);
+            aheadZ = onPath.z;
+        }
+        float gz;
+        if (m.ground && finder.groundAt(ahead.x, ahead.y, aheadZ - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
+            aheadZ = gz + m.carZ;
+        ahead.z = aheadZ;
+        if (!npc->move(ahead, NPCMoveType_Drive, std::max(m.v, 0.5f) / SPEED_UNIT, 0.05f)) {
+            end(npcid, END_INTERRUPTED, false);
+            return;
+        }
+        // The front wheels show the turn (GTA: left is negative).
+        uint16_t ud, lr, keys;
+        npc->getKeys(ud, lr, keys);
+        const int steer = std::clamp(static_cast<int>(-error * 3.0f), -128, 128);
+        npc->setKeys(ud, static_cast<uint16_t>(static_cast<int16_t>(steer)), keys);
     }
 
     // Sends npc to its next point, or ends the move there.
@@ -313,8 +526,8 @@ public:
         auto it = movers_.find(id);
         if (it == movers_.end() || it->second.request) return;
         Mover& m = it->second;
-        // A chaser driving straight, or parked: its next think gives the next move.
-        if (m.chase && (m.direct || m.idle || m.points.empty())) return;
+        // A driver is steered by drive(), which gives it its next move.
+        if (driving(m.kind)) return;
         // Finished a move of ours, or one some other script started?
         const Vector3 at = driving(m.kind) && npc.getVehicle() ? npc.getVehicle()->getPosition() : npc.getPosition();
         const float slack = driving(m.kind) ? DRIVE_STOP + 3.0f : WALK_STOP + 1.5f;
@@ -387,8 +600,9 @@ public:
         const dnav::Point targetGround { tpos.x, tpos.y, tpos.z - FOOT_Z };
 
         if (dist < CHASE_CLOSE) {
-            if (!m.idle) npc->stopMove();
+            // Beside it: drive() brakes to a stop with no path left.
             dropPlan(m);
+            m.points.clear();
             m.idle = true;
             m.direct = false;
             return;
@@ -402,17 +616,34 @@ public:
         if (!carMesh && !roads) straight = true;
         if (straight) {
             dropPlan(m);
-            m.points.clear();
             // Lead the target, unless that point is round a corner.
             Vector3 aim = tpos + tvel * CHASE_LEAD;
             if (carMesh
                 && !finder.lineClear(carGround, dnav::Point { aim.x, aim.y, aim.z - FOOT_Z }, dnav::MeshKind::Car))
                 aim = tpos;
             aim.z = tpos.z - FOOT_Z + m.carZ;
-            const float speed = dist < 2.5f * CHASE_CLOSE ? std::max(DRIVE_MIN_SPEED, m.speed * 0.6f) : m.speed;
+            // A straight run, with the ground under it every few metres.
+            m.points.clear();
+            m.speeds.clear();
+            m.points.push_back(cpos);
+            m.speeds.push_back(1.0f);
+            const float len = glm::distance(Vector2(aim), Vector2(cpos));
+            const int steps = static_cast<int>(len / CHASE_GROUND_STEP);
+            for (int i = 1; i <= steps; i++) {
+                Vector3 p = cpos + (aim - cpos) * (static_cast<float>(i) / (steps + 1));
+                float gz;
+                if (carMesh && finder.groundAt(p.x, p.y, p.z - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
+                    p.z = gz + m.carZ;
+                m.points.push_back(p);
+                m.speeds.push_back(1.0f);
+            }
+            m.points.push_back(aim);
+            m.speeds.push_back(1.0f);
+            m.seg = 0;
+            m.ground = carMesh;
+            m.kind = carMesh ? dnav::PathKind::OffRoad : dnav::PathKind::Drive;
             m.direct = true;
             m.idle = false;
-            if (!npc->move(aim, NPCMoveType_Drive, speed, DRIVE_STOP)) end(npcid, END_INTERRUPTED, false);
             return;
         }
 
@@ -421,10 +652,11 @@ public:
         const bool stale = m.direct || m.idle || m.points.empty()
             || moved > std::max(CHASE_REPLAN, dist * CHASE_REPLAN_SHARE) || now - m.planned > CHASE_REPLAN_AFTER;
         if (!stale || m.plan) return;
-        // On the roads while the target is; across the car mesh once it leaves them.
+        // Near, straight across the car mesh (on or off the road); far, the roads while
+        // the target is on one.
         const bool onRoad = roads && finder.roads().nearest(targetGround.x, targetGround.y, targetGround.z,
             CHASE_ON_ROAD, {}) >= 0;
-        const bool offRoad = carMesh && (!roads || !onRoad) && now >= m.noOffRoadUntil;
+        const bool offRoad = carMesh && now >= m.noOffRoadUntil && (!roads || !onRoad || dist < CHASE_OFFROAD_RANGE);
         const dnav::PathKind kind = offRoad ? dnav::PathKind::OffRoad : dnav::PathKind::Drive;
         const int id = finder.request(m.owner, carGround, targetGround, kind, {});
         if (!id) return;
@@ -446,26 +678,20 @@ public:
         if (r.status < dnav::PathStatus::Ok || r.points.empty()) {
             // The car mesh found no way: roads for a while. The roads found none:
             // the next think tries again (or drives straight once close).
-            if (r.kind == dnav::PathKind::OffRoad) m.noOffRoadUntil = now + CHASE_NO_OFFROAD;
+            if (r.kind == dnav::PathKind::OffRoad) {
+                m.noOffRoadUntil = now + CHASE_NO_OFFROAD;
+                core_->printLn("[nav] chase: npc %d found no way across the car navmesh (status %d)", npcid,
+                    static_cast<int>(r.status));
+            }
             m.nextThink = TimePoint {};
             return;
         }
-        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
-        IVehicle* car = npc ? npc->getVehicle() : nullptr;
-        if (!car) return;       // the next think ends it
         m.kind = r.kind;
-        m.points.clear();
-        for (const auto& p : r.points) m.points.push_back(Vector3(p.x, p.y, p.z + m.carZ));
-        m.speeds = r.speeds;
+        setDrivePath(npcid, m, r);
         m.planGoal = m.askedGoal;
         m.planned = now;
         m.direct = false;
         m.idle = false;
-        // The search started from where the car was; it has driven on since.
-        const Vector3 at = car->getPosition();
-        m.next = 0;
-        while (m.next + 1 < m.points.size() && glm::distance(at, m.points[m.next]) < CHASE_SKIP) m.next++;
-        step(npcid, m);
     }
 
     void onNPCDeath(INPC& npc, IPlayer*, int) override { end(npc.getID(), END_INTERRUPTED, false); }

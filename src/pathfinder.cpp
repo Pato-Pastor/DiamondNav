@@ -425,6 +425,23 @@ bool Pathfinder::random(Point& out, MeshKind k) const
     return true;
 }
 
+bool Pathfinder::groundAt(float x, float y, float z, float reach, float& out, MeshKind k) const
+{
+    dtNavMeshQuery* q = mesh(k).query;
+    if (!q) return false;
+    dtQueryFilter filter;
+    const Point p { x, y, z };
+    float rc[3], ext[3] = { 0.5f, reach, 0.5f }, hit[3];
+    toRecast(&p.x, rc);
+    dtPolyRef ref = 0;
+    q->findNearestPoly(rc, ext, &filter, &ref, hit);
+    if (!ref) return false;
+    float h = 0.0f;
+    if (dtStatusFailed(q->getPolyHeight(ref, rc, &h))) h = hit[1];
+    out = h;
+    return true;
+}
+
 bool Pathfinder::lineClear(const Point& from, const Point& to, MeshKind k) const
 {
     dtNavMeshQuery* q = mesh(k).query;
