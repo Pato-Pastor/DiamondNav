@@ -8,7 +8,8 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
   slow down for them, on a road graph built from GTA's own traffic paths.
 - **Chasing:** an NPC driver chases a player along the roads, and off them across a
   car-sized navmesh when the player leaves the road; close in, it drives straight
-  at them when nothing is in the way.
+  at them when nothing is in the way. Drivers steer like cars: they curve into
+  corners, brake for them, and back up to turn round in tight spots.
 - **Your maps too:** custom SA-MP maps are baked in: objects your scripts create,
   buildings they remove, and custom models with their own collision. Build the
   world from a GTA San Andreas install or from ColAndreas's database.
@@ -198,6 +199,10 @@ without it. What it changes:
 - **Driving looks right**: the car's speed is sent in the units the game expects
   (stock sent it 20 times too small, so cars crawled and jumped for players), cars
   pitch along slopes, and the front wheels steer into turns.
+- **Cars back up**: an `NPC_Move` drive with a negative speed reverses away from its
+  target. DiamondNav uses it for three-point turns, and for a target just behind the
+  car; with the stock component it notices, says so once in the log, and turns
+  round going forward instead.
 
 It only fits the open.mp release it was built from. To build it yourself or for
 another release, see [npcs/README.md](npcs/README.md).

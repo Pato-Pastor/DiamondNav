@@ -58,6 +58,15 @@ constexpr float AHEAD_TIME = 0.5f;      // NPC_Move's target: this far ahead of 
 constexpr float AHEAD_MIN = 3.0f;
 constexpr float ARRIVE = 2.5f;          // a drive ends this near its last point
 constexpr float GROUND_REACH = 3.0f;    // how far up or down the car mesh's ground is looked for
+constexpr float REVERSE_SPEED = 4.0f;   // m/s backing up
+constexpr float REVERSE_BEHIND = 100.0f; // backs up when the point it aims at is further round than this...
+constexpr float REVERSE_NEAR = 16.0f;   // ...and nearer than this (a forward U-turn is 13 m across)
+constexpr float REVERSE_INSIDE = 60.0f; // or this far round and inside its turning circle
+constexpr float REVERSE_DONE = 40.0f;   // drives forward again once it points this near the aim
+constexpr float REVERSE_MAX = 12.0f;    // backs up at most this far at a time
+constexpr float REVERSE_CHECK = 4.0f;   // the car mesh must be clear this far behind it
+constexpr float CIRCLING_TURN = 60.0f;  // turning this hard...
+constexpr float CIRCLING_SECS = 5.0f;   // ...this long means it is going round in circles: back up
 
 // Nav_Chase.
 constexpr auto CHASE_THINK = std::chrono::milliseconds(250);   // how often a chaser looks at its target
@@ -112,6 +121,10 @@ struct Mover {
     bool ground = false;                // read the height off the car mesh as it goes
     TimePoint lastDrive {};
     Vector3 lastPos {};                 // the NPC's position at the last drive()
+    bool reversing = false;             // backing up (a three-point turn, or out of a corner)
+    float backed = 0.0f;                // metres backed up this time
+    float circling = 0.0f;              // seconds spent turning hard
+    int wrongWay = 0;                   // drive()s in a row that a back-up went forward
 
     // Nav_Chase: the car follows a player until Nav_Stop. It re-plans as the target
     // moves and keeps driving the old plan until the new one comes back.
@@ -132,6 +145,7 @@ public:
     static DiamondNav* instance;
 
     dnav::Pathfinder finder;
+    bool canReverse_ = true;            // the NPC component backs cars up (our patched build)
     // The result being handed to a script right now (Nav_GetPathPoint reads it).
     const dnav::PathResult* current = nullptr;
 
@@ -375,6 +389,7 @@ public:
         float dt = std::chrono::duration<float>(now - m.lastDrive).count();
         m.lastDrive = now;
         const Vector3 pos = npc->getPosition();
+        const Vector3 moved = pos - m.lastPos;
         m.lastPos = pos;
         if (!m.rolling) {
             m.heading = car->getRotation().ToEuler().z;
@@ -450,6 +465,60 @@ public:
             // Brake to stop at the end.
             target = std::min(target, std::sqrt(2.0f * BRAKE * 0.6f * std::max(0.0f, remaining - ARRIVE * 0.5f)));
             ahead2 = Vector3(aim);
+
+            // Backing up. A car can't turn on the spot: a point behind it and near, or
+            // inside its turning circle, is reached by backing up with the wheels turned
+            // so the nose swings round to it (a three-point turn), not by a wide loop.
+            const float abs2 = std::fabs(error);
+            const Vector2 to = Vector2(aim) - Vector2(pos);
+            const float d = glm::length(to);
+            const float hr = glm::radians(m.heading);
+            const Vector2 fwd(-std::sin(hr), std::cos(hr));
+            const Vector2 left(-fwd.y, fwd.x);
+            const Vector2 centre = Vector2(pos) + left * (glm::dot(to, left) >= 0.0f ? TURN_RADIUS : -TURN_RADIUS);
+            const bool inside = glm::distance(Vector2(aim), centre) < TURN_RADIUS * 0.95f;
+            // open.mp's own NPC component only drives forward (our patched build backs up):
+            // a car told to back up that moves forward instead means it never will.
+            if (m.reversing && m.v > 1.0f) {
+                if (glm::dot(Vector2(moved), fwd) > 0.02f) {
+                    if (++m.wrongWay >= 3 && canReverse_) {
+                        canReverse_ = false;
+                        core_->printLn("[nav] this NPC component can't drive backwards, so cars turn round going forward (the patched NPCs build in npcs/ can)");
+                    }
+                } else {
+                    m.wrongWay = 0;
+                }
+            }
+            bool back = m.reversing;
+            if (!m.reversing) {
+                if (abs2 > CIRCLING_TURN && m.v > 1.0f) m.circling += dt;
+                else if (abs2 < CIRCLING_TURN * 0.5f) m.circling = 0.0f;
+                back = (abs2 > REVERSE_BEHIND && d < REVERSE_NEAR) || (abs2 > REVERSE_INSIDE && inside)
+                    || m.circling > CIRCLING_SECS;
+            } else if (abs2 < REVERSE_DONE || m.backed > REVERSE_MAX) {
+                back = false;
+            }
+            if (!canReverse_) back = false;
+            // Never back into a wall the car mesh knows about.
+            if (back) {
+                float gz;
+                const dnav::Point from { pos.x, pos.y, pos.z - m.carZ };
+                const Vector2 rear = Vector2(pos) - fwd * REVERSE_CHECK;
+                if (finder.groundAt(from.x, from.y, from.z, GROUND_REACH, gz, dnav::MeshKind::Car)
+                    && !finder.lineClear(from, dnav::Point { rear.x, rear.y, from.z }, dnav::MeshKind::Car))
+                    back = false;
+            }
+            if (back != m.reversing) {
+                // Stop before changing direction.
+                target = 0.0f;
+                if (m.v < 0.5f) {
+                    m.reversing = back;
+                    m.backed = 0.0f;
+                    m.circling = 0.0f;
+                }
+            } else if (m.reversing) {
+                target = std::min(REVERSE_SPEED, std::max(target, TURN_MIN_SPEED));
+            }
         }
 
         m.v += std::clamp(target - m.v, -BRAKE * dt, ACCEL * dt);
@@ -459,8 +528,10 @@ public:
             if (npc->isMoving()) npc->stopMove();
             return;
         }
+        // Backing up, the nose still swings toward the aim: the wheels turn the other way.
         const float maxYaw = glm::degrees(std::max(m.v, TURN_MIN_SPEED * 0.5f) / TURN_RADIUS);
         m.heading = wrap180(m.heading + std::clamp(error, -maxYaw * dt, maxYaw * dt));
+        if (m.reversing) m.backed += m.v * dt;
 
         // NPC_Move's target: straight ahead on the new heading, at the path's height (or
         // the car mesh's ground under it).
@@ -476,14 +547,29 @@ public:
         if (m.ground && finder.groundAt(ahead.x, ahead.y, aheadZ - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
             aheadZ = gz + m.carZ;
         ahead.z = aheadZ;
-        if (!npc->move(ahead, NPCMoveType_Drive, std::max(m.v, 0.5f) / SPEED_UNIT, 0.05f)) {
+        float moveSpeed = std::max(m.v, 0.5f) / SPEED_UNIT;
+        if (m.reversing) {
+            // NPC_Move faces its target and a negative speed moves away from it, so
+            // backing toward a point behind is a move to its mirror image ahead.
+            Vector3 behind(pos.x + std::sin(h) * reach, pos.y - std::cos(h) * reach, pos.z);
+            if (finder.groundAt(behind.x, behind.y, pos.z - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
+                behind.z = gz + m.carZ;
+            ahead = pos * 2.0f - behind;
+            moveSpeed = -moveSpeed;
+        }
+        if (!npc->move(ahead, NPCMoveType_Drive, moveSpeed, 0.05f)) {
             end(npcid, END_INTERRUPTED, false);
             return;
         }
-        // The front wheels show the turn (GTA: left is negative).
+        // The front wheels show the turn (GTA: left is negative); backing up, they
+        // turn the other way, and the car holds the brake/reverse key.
         uint16_t ud, lr, keys;
         npc->getKeys(ud, lr, keys);
-        const int steer = std::clamp(static_cast<int>(-error * 3.0f), -128, 128);
+        int steer = std::clamp(static_cast<int>(-error * 3.0f), -128, 128);
+        if (m.reversing) {
+            steer = -steer;
+            keys = (keys & ~static_cast<uint16_t>(Key::SPRINT)) | static_cast<uint16_t>(Key::JUMP);
+        }
         npc->setKeys(ud, static_cast<uint16_t>(static_cast<int16_t>(steer)), keys);
     }
 

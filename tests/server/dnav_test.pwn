@@ -1,7 +1,8 @@
 // A real open.mp server running DiamondNav on the made-up yard (tests/fake_gta.py):
 // one NPC walks across the yard round the wall, another drives along the street
 // and up the one-way road, a third chases a fourth across the yard round the wall
-// on the car navmesh, and two searches come back through OnNavPathResult.
+// on the car navmesh, a fifth turns round by backing up to chase a sixth behind it,
+// and two searches come back through OnNavPathResult.
 // tests/server/run.py bakes the yard, compiles this, boots the server and reads
 // the "[dnav-test]" lines.
 
@@ -15,6 +16,8 @@
 
 new gWalker = INVALID_NPC_ID, gDriver = INVALID_NPC_ID, gCar = INVALID_VEHICLE_ID;
 new gChaser = INVALID_NPC_ID, gQuarry = INVALID_NPC_ID, gChaseCar = INVALID_VEHICLE_ID;
+new gTurner = INVALID_NPC_ID, gTurnQuarry = INVALID_NPC_ID, gTurnCar = INVALID_VEHICLE_ID;
+new Float:gTurnLast[3], bool:gTurnReversed, bool:gTurnCaught, bool:gTurnLeftYard, bool:gTurnStopped;
 new gPathRequest, gRouteRequest;
 new bool:gWalked, bool:gDrove, bool:gPathOk, bool:gRouteOk, bool:gThroughWall;
 new bool:gCaught, bool:gChaseThroughWall, bool:gChaseStopped;
@@ -36,6 +39,13 @@ Finish()
     if (!gCaught) Fail("the chaser did not catch up");
     if (gChaseThroughWall) Fail("the chaser drove through the wall");
     if (!gChaseStopped) Fail("Nav_Stop did not end the chase");
+    // open.mp's own NPC component drives forward only: the turner goes round instead.
+    #if defined PATCHED_NPCS
+        if (!gTurnReversed) Fail("the turner never backed up");
+    #endif
+    if (!gTurnCaught) Fail("the turner did not reach the NPC behind it");
+    if (gTurnLeftYard) Fail("the turner drove off the yard");
+    if (!gTurnStopped) Fail("Nav_Stop did not end the turner's chase");
     print(gFailures ? ("[dnav-test] FAILED") : ("[dnav-test] PASS"));
     SendRconCommand("exit");
 }
@@ -72,6 +82,13 @@ public OnGameModeInit()
     NPC_Spawn(gChaser);
     NPC_Spawn(gQuarry);
     gChaseCar = CreateVehicle(560, YX - 20.0, YY + 2.0, YZ + 1.0, 270.0, 0, 0, -1);
+    // The turner faces east in the open north-west corner; its quarry is 16 m behind it.
+    gTurner = NPC_Create("dnav_turner");
+    gTurnQuarry = NPC_Create("dnav_turnq");
+    NPC_Spawn(gTurner);
+    NPC_Spawn(gTurnQuarry);
+    gTurnCar = CreateVehicle(560, YX - 8.0, YY + 22.0, YZ + 1.0, 270.0, 0, 0, -1);
+    gTurnLast[0] = YX - 8.0, gTurnLast[1] = YY + 22.0;
     SetTimer("StartMoving", 500, false);
     SetTimer("Watch", 200, true);
     SetTimer("TimedOut", TIMEOUT_MS, false);
@@ -92,6 +109,10 @@ public StartMoving()
     NPC_SetPos(gQuarry, YX + 20.0, YY - 2.0, YZ + 1.0);
     NPC_PutInVehicle(gChaser, gChaseCar, 0);
     if (!Nav_Chase(gChaser, gQuarry, 1.2)) Fail("Nav_Chase refused");
+
+    NPC_SetPos(gTurnQuarry, YX - 24.0, YY + 22.0, YZ + 1.0);
+    NPC_PutInVehicle(gTurner, gTurnCar, 0);
+    if (!Nav_Chase(gTurner, gTurnQuarry, 1.0)) Fail("Nav_Chase refused the turner");
 }
 
 forward Watch();
@@ -101,6 +122,22 @@ public Watch()
     NPC_GetPos(gWalker, x, y, z);
     // The wall: 0.5 m thick along y at x = YX, 20 m long.
     if (floatabs(x - YX) < 0.25 && floatabs(y - YY) < 10.0) gThroughWall = true;
+
+    if (gTurnCar != INVALID_VEHICLE_ID && !gTurnCaught) {
+        new Float:a;
+        GetVehiclePos(gTurnCar, x, y, z);
+        GetVehicleZAngle(gTurnCar, a);
+        // Moving against the way it faces: backing up.
+        new Float:dx = x - gTurnLast[0], Float:dy = y - gTurnLast[1];
+        if (dx * -floatsin(a, degrees) + dy * floatcos(a, degrees) < -0.2) gTurnReversed = true;
+        gTurnLast[0] = x, gTurnLast[1] = y;
+        if (floatabs(x - YX) > 29.0 || floatabs(y - YY) > 29.0) gTurnLeftYard = true;
+        if (VectorSize(x - (YX - 24.0), y - (YY + 22.0), 0.0) < 7.0) {
+            printf("[dnav-test] turner reached its quarry: car at %.1f %.1f %.1f, backed up: %d", x, y, z, gTurnReversed);
+            gTurnCaught = true;
+            Nav_Stop(gTurner);
+        }
+    }
 
     if (gChaseCar == INVALID_VEHICLE_ID || gCaught) return;
     GetVehiclePos(gChaseCar, x, y, z);
@@ -116,7 +153,7 @@ public Watch()
 forward TimedOut();
 public TimedOut()
 {
-    if (gDone < 3) Fail("timed out");
+    if (gDone < 4) Fail("timed out");
     Finish();
 }
 
@@ -152,7 +189,11 @@ public OnNavMoveEnd(npcid, reason)
         printf("[dnav-test] chase ended: reason %d", reason);
         gChaseStopped = gCaught && reason == NAV_END_STOPPED;
         gDone++;
+    } else if (npcid == gTurner) {
+        printf("[dnav-test] turner's chase ended: reason %d", reason);
+        gTurnStopped = gTurnCaught && reason == NAV_END_STOPPED;
+        gDone++;
     }
-    if (gDone == 3) Finish();
+    if (gDone == 4) Finish();
     return 1;
 }

@@ -455,11 +455,12 @@ bool Pathfinder::lineClear(const Point& from, const Point& to, MeshKind k) const
     q->findNearestPoly(e, reachOf(k), &filter, &eref, ne);
     if (!sref || !eref) return false;
     // The ray runs along the mesh's surface; t stays FLT_MAX when it reaches the
-    // end without leaving the mesh.
+    // end without leaving the mesh. It aims at the end itself, not the nearest point
+    // on the mesh, so an end just off the mesh's edge is not clear.
     float t = 0.0f, normal[3];
     dtPolyRef path[256];
     int npath = 0;
-    if (dtStatusFailed(q->raycast(sref, ns, ne, &filter, &t, normal, path, &npath, 256))) return false;
+    if (dtStatusFailed(q->raycast(sref, ns, e, &filter, &t, normal, path, &npath, 256))) return false;
     if (t < 1.0f || npath == 0) return false;
     // It reached the end's x and z; the end's polygon must be on the same floor.
     return path[npath - 1] == eref;

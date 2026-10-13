@@ -74,7 +74,8 @@ def main():
 
         pawncc = srv / "qawno" / f"pawncc{exe}"
         res = subprocess.run([str(pawncc), str(HERE / "dnav_test.pwn"), f"-i{srv / 'qawno' / 'include'}",
-                              f"-i{REPO / 'include'}", f"-o{srv / 'gamemodes' / 'dnav_test.amx'}", "-d1", "-O1", "-;+", "-(+"],
+                              f"-i{REPO / 'include'}", f"-o{srv / 'gamemodes' / 'dnav_test.amx'}", "-d1", "-O1", "-;+", "-(+"]
+                             + (["PATCHED_NPCS=1"] if a.npcs else []),
                              capture_output=True, text=True, cwd=srv / "qawno")
         print(res.stdout + res.stderr)
         if res.returncode:

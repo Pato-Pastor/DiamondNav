@@ -1,5 +1,5 @@
 diff --git a/Server/Components/NPCs/NPC/npc.cpp b/Server/Components/NPCs/NPC/npc.cpp
-index 0fc070e..00464a1 100644
+index 0fc070e..17ab07f 100644
 --- a/Server/Components/NPCs/NPC/npc.cpp
 +++ b/Server/Components/NPCs/NPC/npc.cpp
 @@ -443,7 +443,31 @@ bool NPC::move(Vector3 pos, NPCMoveType moveType, float moveSpeed, float stopRan
@@ -140,7 +140,24 @@ index 0fc070e..00464a1 100644
  	{
  		return;
  	}
-@@ -2680,6 +2726,13 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+@@ -2346,6 +2392,16 @@ void NPC::advance(TimePoint now)
+ 	float velocityLength = glm::length(velocity_);
+ 	auto maxTravel = velocityLength * deltaTimeMS;
+ 
++	// DiamondNav: a drive with a negative speed backs away from its target (the car
++	// faces the target and reverses), so it travels along its velocity and never
++	// arrives; the script that started it stops it.
++	if (moveType_ == NPCMoveType_Drive && glm::dot(velocity_, toTarget) < 0.0f)
++	{
++		position_ = position + velocity_ * deltaTimeMS;
++		lastMove_ = now;
++		return;
++	}
++
+ 	if (distanceToTarget <= stopRange_ || maxTravel >= distanceToTarget)
+ 	{
+ 		// Reached or about to overshoot target
+@@ -2680,6 +2736,13 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
  						advance(now);
  					}
  
@@ -154,7 +171,7 @@ index 0fc070e..00464a1 100644
  					if (state == PlayerState_OnFoot)
  					{
  						if (surfingData_.type != PlayerSurfingData::Type::None)
-@@ -2750,7 +2803,12 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+@@ -2750,7 +2813,12 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
  								vehicleSeatToEnter_ = SEAT_NONE;
  							}
  						}
@@ -167,7 +184,7 @@ index 0fc070e..00464a1 100644
  						if (aiming_)
  						{
  							auto player = npcComponent_->getCore()->getPlayers().get(hitId_);
-@@ -2852,7 +2910,7 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+@@ -2852,7 +2920,7 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
  								}
  							}
  						}
@@ -176,7 +193,7 @@ index 0fc070e..00464a1 100644
  						{
  							if (duration_cast<Milliseconds>(lastUpdate_ - shootUpdateTime_) >= meleeAttackDelay_)
  							{
-@@ -2879,6 +2937,8 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
+@@ -2879,6 +2947,8 @@ void NPC::tick(Microseconds elapsed, TimePoint now)
  								}
  							}
  						}
@@ -185,7 +202,7 @@ index 0fc070e..00464a1 100644
  					}
  
  					if (exitingVehicle_ && duration_cast<Milliseconds>(now - vehicleEnterExitUpdateTime_).count() > (1500))
-@@ -3122,3 +3182,51 @@ void NPC::resetSurfingData()
+@@ -3122,3 +3192,51 @@ void NPC::resetSurfingData()
  	surfingData_.ID = 0;
  	surfingData_.type = PlayerSurfingData::Type::None;
  }
