@@ -263,6 +263,8 @@ PathResult Pathfinder::findRoute(const PathRequest& r) const
     for (const auto& p : pts) {
         res.points.push_back(Point { p.x, p.y, p.z });
         res.speeds.push_back(p.speed);
+        res.classes.push_back(p.cls);
+        res.junctions.push_back(p.junction ? 1 : 0);
     }
     return res;
 }
@@ -373,6 +375,8 @@ void Pathfinder::offRoadSpeeds(PathResult& res)
 {
     const auto& p = res.points;
     res.speeds.assign(p.size(), 1.0f);
+    res.classes.assign(p.size(), RoadClass::OffRoad);
+    res.junctions.assign(p.size(), 0);
     for (size_t i = 1; i + 1 < p.size(); i++) {
         const float ax = p[i].x - p[i - 1].x, ay = p[i].y - p[i - 1].y;
         const float bx = p[i + 1].x - p[i].x, by = p[i + 1].y - p[i].y;

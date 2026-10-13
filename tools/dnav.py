@@ -3,6 +3,7 @@
 
     dnav.py world   build the world's collision for navbake (stock map + your maps)
     dnav.py roads   build roads.dnr, the road graph NPC drivers follow
+    dnav.py vehicles build vehicles.dnv, how each vehicle model drives (from handling.cfg)
     dnav.py preview draw a baked navmesh, its checked routes and the roads as a PNG
 
 Run `dnav.py <command> --help` for each. A typical bake of the whole map:
@@ -11,9 +12,10 @@ Run `dnav.py <command> --help` for each. A typical bake of the whole map:
     navbake out/world.tris navmesh/world.nav --seeds out/world.seeds.txt --water out/world.water.txt
     navbake out/world.tris navmesh/world_car.nav --agent car --water out/world.water.txt
     python3 tools/dnav.py roads --gta "C:/Games/GTA San Andreas" navmesh/roads.dnr
+    python3 tools/dnav.py vehicles --gta "C:/Games/GTA San Andreas" navmesh/vehicles.dnv
 
 and the server loads everything in its navmesh/ folder at start.
-Needs Python 3.9+; world also needs numpy, preview Pillow. roads needs nothing else.
+Needs Python 3.9+; world also needs numpy, preview Pillow. roads and vehicles need nothing else.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dnavlib import gta, roads  # noqa: E402  (world and preview need numpy: imported when used)
+from dnavlib import gta, roads, vehicles  # noqa: E402  (world and preview need numpy: imported when used)
 
 
 def area_arg(v):
@@ -68,6 +70,12 @@ def cmd_roads(a):
     return 0
 
 
+def cmd_vehicles(a):
+    n = vehicles.build(a.out, a.gta)
+    print(f"wrote {a.out}: {n} vehicle models")
+    return 0
+
+
 def cmd_preview(a):
     from dnavlib import preview
     p = a.prefix
@@ -107,6 +115,12 @@ def main(argv=None):
     r.add_argument("--no-boats", action="store_true", help="leave out the water routes")
     r.add_argument("--help-format", action="store_true", help="how a roads file is written")
     r.set_defaults(fn=cmd_roads)
+
+    v = sub.add_parser("vehicles", help="build vehicles.dnv, how each model drives", description=vehicles.__doc__,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    v.add_argument("out", type=Path, help="output file, normally navmesh/vehicles.dnv")
+    v.add_argument("--gta", type=Path, required=True, help="a GTA San Andreas folder (data/handling.cfg, data/vehicles.ide)")
+    v.set_defaults(fn=cmd_vehicles)
 
     p = sub.add_parser("preview", help="draw a navmesh, its routes and the roads as a PNG")
     p.add_argument("out", type=Path, help="the PNG to write")

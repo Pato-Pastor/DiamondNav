@@ -25,7 +25,7 @@ sys.path.insert(0, str(REPO / "tools"))
 sys.path.insert(0, str(REPO / "tools" / "tests"))
 
 import test_tools as tt                      # noqa: E402
-from dnavlib import gta, roads, world       # noqa: E402
+from dnavlib import gta, roads, vehicles, world  # noqa: E402
 
 
 def main():
@@ -71,6 +71,7 @@ def main():
             print(res.stdout + res.stderr)
             return 1
         roads.build(srv / "navmesh" / "roads.dnr", gta.node_files(yard / "gta", []))
+        vehicles.build(srv / "navmesh" / "vehicles.dnv", yard / "gta")
 
         pawncc = srv / "qawno" / f"pawncc{exe}"
         res = subprocess.run([str(pawncc), str(HERE / "dnav_test.pwn"), f"-i{srv / 'qawno' / 'include'}",

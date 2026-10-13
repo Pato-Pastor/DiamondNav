@@ -56,6 +56,23 @@ inst
 9006, yard_shed, 0, {YX - 20}, {YY - 20}, {YZ}, 0, 0, 0, 1, -1
 end
 """)
+    # How three made-up vehicles drive, and a boat that does not (vehicles.dnv).
+    (root / "data" / "handling.cfg").write_text("""; a made-up handling.cfg
+SULTAN 1400.0 3400.0 2.0 0.0 0.1 -0.1 75 0.80 0.80 0.50 5 170.0 30.0 10.0 4 P 8.0 0.50 0 30.0 1.0 0.1
+LINERUN 3800.0 19953.2 5.0 0.0 0.0 -0.65 90 0.65 0.85 0.5 5 120.0 14.0 25.0 R D 3.17 0.4 0 25.0 1.0 0.1
+NRG500 400.0 200.0 4.0 0.0 0.08 -0.09 103 1.80 0.90 0.48 5 190.0 50.0 5.0 R P 15.0 0.50 0 35.0 1.0 0.1
+REEFER 5000.0 30000.0 0.8 0.0 0.0 0.0 7 2.2 15.0 0.65 5 190.0 0.2 5.0 R P 0.04 0.80 0 26.0 1.0 0.1
+% REEFER 0.5 3.5 0.7 7.0 0.6 4.0 0.7 1.0 2.0 1.0
+! NRG500 0.15 0.15 1.20 1.80 0.40 0.50 26.0 0.75 0.90 0.20
+""")
+    (root / "data" / "vehicles.ide").write_text("""# made-up vehicles
+cars
+560, sultan, sultan, car, SULTAN, SULTAN, null, richfamily, 10, 0, 0, -1, 0.7, 0.7, 2
+403, linerun, linerun, car, LINERUN, LINERUN, null, worker, 10, 0, 0, -1, 1.0, 1.0, -1
+522, nrg500, nrg500, bike, NRG500, NRG500, bikes, motorbike, 10, 0, 0, 16, 0.5, 0.5, -1
+453, reefer, reefer, boat, REEFER, REEFER, null, ignore, 10, 0, 0
+end
+""")
     (root / "data" / "water.dat").write_text(
         "processed\n" + " ".join(f"{x} {y} {YZ - 1.0} 0 0 0 0" for x, y in
                                  [(YX + 15, YY + 15), (YX + 25, YY + 15), (YX + 15, YY + 25), (YX + 25, YY + 25)]) + " 1\n")
@@ -301,6 +318,8 @@ class Roads(unittest.TestCase):
         self.assertEqual((ab, ba) if e < north else (ba, ab), (1, 0))
         self.assertTrue(g.nodes[idx[(YX + 100, YY + 200)]].flags & roads.EMERGENCY_ONLY)
         self.assertEqual(len(g.links), 4)
+        # GTA's traffic level comes along (full traffic here) for the road classes.
+        self.assertTrue(all(n.flags & roads.DETAIL and not n.flags & 0x30 for n in g.nodes))
 
     def test_custom_roads(self):
         text = f"""
@@ -323,6 +342,11 @@ class Roads(unittest.TestCase):
             roads.apply_roads_file(roads.Graph(), "road a b", "bad")
         with self.assertRaises(SystemExit):
             roads.apply_roads_file(roads.from_gta(self.files), "road 0,0,0 1,1,1", "far")
+        g = roads.Graph()
+        roads.apply_roads_file(g, "node a 0 0 0 main\nnode b 9 0 0 minor emergency\nroad a b", "classes")
+        self.assertEqual((g.nodes[0].flags, g.nodes[1].flags), (roads.MAIN, roads.MINOR | roads.EMERGENCY_ONLY))
+        with self.assertRaises(SystemExit):
+            roads.apply_roads_file(roads.Graph(), "node a 0 0 0 main highway", "two classes")
 
     def test_route_with_navquery(self):
         navquery = BUILD / ("navquery.exe" if os.name == "nt" else "navquery")
@@ -341,6 +365,33 @@ class Roads(unittest.TestCase):
         res = subprocess.run([str(navquery), str(folder), "route", str(YX + 100), str(YY + 60), str(YZ),
                               str(YX - 100), str(YY - 40), str(YZ)], capture_output=True, text=True)
         self.assertEqual(res.returncode, 1)
+
+
+class Vehicles(unittest.TestCase):
+    def test_from_handling(self):
+        from dnavlib import vehicles
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_install(root / "gta")
+            out = root / "vehicles.dnv"
+            self.assertEqual(vehicles.build(out, root / "gta"), 3)          # not the boat
+            lines = out.read_text().splitlines()
+            self.assertEqual(lines[0], "DNVH 1")
+            rows = {int(t[0]): [float(v) for v in t[1:6]] for t in (l.split() for l in lines[1:] if l[0] != "#")}
+            self.assertEqual(sorted(rows), [403, 522, 560])
+            sultan, truck, bike = rows[560], rows[403], rows[522]
+            self.assertAlmostEqual(sultan[0], 170.0 * 0.9 / 3.6, places=2)    # top, m/s
+            self.assertGreater(sultan[0], truck[0])
+            self.assertGreater(sultan[1], truck[1] * 2)                     # accel
+            self.assertGreater(sultan[2], truck[2])                         # brake
+            self.assertGreater(sultan[3], truck[3])                         # grip
+            self.assertLess(bike[4], sultan[4])                             # turning circle
+            self.assertLess(sultan[4], truck[4])
+            for v in rows.values():
+                for (lo, hi), x in zip(vehicles.LIMITS.values(), v):
+                    self.assertTrue(lo <= x <= hi)
+        with self.assertRaises(SystemExit):
+            vehicles.build(Path(tmp) / "x.dnv", Path(tmp) / "nowhere")
 
 
 if __name__ == "__main__":

@@ -59,6 +59,8 @@ struct PathResult {
     PathStatus status = PathStatus::NoPath;
     std::vector<Point> points;
     std::vector<float> speeds;      // Drive, OffRoad: 0..1 of cruising speed at each point
+    std::vector<RoadClass> classes; // Drive, OffRoad: the road each point is on
+    std::vector<uint8_t> junctions; // Drive: 1 where the point is in a junction
 };
 
 class Pathfinder {

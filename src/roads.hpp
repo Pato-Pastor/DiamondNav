@@ -23,6 +23,21 @@ enum RoadNodeFlags : uint16_t {
     ROAD_HIGHWAY = 1,
     ROAD_EMERGENCY_ONLY = 2,    // GTA: only emergency vehicles drive here
     ROAD_BOATS = 4,             // a water route
+    ROAD_DETAIL = 8,            // the traffic level below is GTA's (older files leave it 0)
+    ROAD_TRAFFIC = 0x30,        // GTA's traffic level, 0 (full) .. 3 (low), in bits 4-5
+    ROAD_MINOR = 0x40,          // a custom road marked minor
+    ROAD_MAIN = 0x80,           // a custom road marked main
+};
+
+// What sort of road a stretch is, which sets its speed limit (Nav_SetRoadSpeed).
+enum class RoadClass : uint8_t {
+    Highway = 0,                // GTA's highway flag: freeways
+    Main = 1,                   // two or more lanes each way (or one-way)
+    Street = 2,                 // one lane each way
+    Minor = 3,                  // GTA's low-traffic roads: back streets, country lanes
+    Service = 4,                // emergency-only: airport aprons, yards, car parks
+    OffRoad = 5,                // the car navmesh, off the roads
+    Count = 6,
 };
 
 struct RoadNode {
@@ -43,6 +58,8 @@ struct RoadEdge {
 struct RoutePoint {
     float x, y, z;              // the road surface in the car's lane
     float speed;                // 0..1 of cruising speed (corners, the last stretch)
+    RoadClass cls = RoadClass::Street;
+    bool junction = false;      // where three or more roads meet
 };
 
 struct RouteOptions {
@@ -77,6 +94,8 @@ public:
         std::vector<RoutePoint>& out) const;
 
     const std::vector<RoadNode>& nodes() const { return nodes_; }
+    // The class of the road from node `from` along `e`.
+    RoadClass classOf(uint32_t from, const RoadEdge& e) const;
 
 private:
     bool usable(const RoadNode& n, const RouteOptions& opt) const;

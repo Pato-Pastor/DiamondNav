@@ -4,8 +4,12 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 
 - **Walking:** NPCs find their way on foot round walls, up stairs and across
   bridges, on a navmesh baked from the game world's collision (Recast/Detour).
-- **Driving:** NPC drivers follow the roads, keep to their lane, round corners and
-  slow down for them, on a road graph built from GTA's own traffic paths.
+- **Driving:** NPC drivers follow the roads and keep to their lane, on a road graph
+  built from GTA's own traffic paths. They drive like their car: top speed,
+  acceleration, braking, grip and turning circle come from the game's own
+  handling data. Each road has a speed limit by its class (highway, main road,
+  street, minor road, service road), they brake in time for corners and junctions,
+  and a driving style (cautious, normal, fast, pursuit) sets how hard they push.
 - **Chasing:** an NPC driver chases a player along the roads, and off them across a
   car-sized navmesh when the player leaves the road; close in, it drives straight
   at them when nothing is in the way. Drivers steer like cars: they curve into
@@ -23,7 +27,7 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 #include <DiamondNav>
 
 Nav_WalkTo(npcid, x, y, z);                // walk there along the navmesh
-Nav_DriveTo(npcid, x, y, z, 1.2);          // drive the NPC's car there along the roads
+Nav_DriveTo(npcid, x, y, z);               // drive the NPC's car there along the roads
 Nav_Chase(npcid, playerid);                // chase a player, on or off the road
 
 public OnNavMoveEnd(npcid, reason)
@@ -55,8 +59,9 @@ loaded:
 
 ```
 [nav] loaded roads.dnr: <nodes> road nodes, <links> links
-[nav] loaded world.nav
-[nav] DiamondNav 1.0.0: <tiles> navmesh tiles, <nodes> road nodes, 3 search threads
+[nav] loaded world.nav (walking)
+[nav] loaded vehicles.dnv: <models> vehicle models
+[nav] DiamondNav 1.2.0: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -139,6 +144,18 @@ road gate park 1 0                     # one-way into the car park
 remove 1600 -1700 1700 -1600           # this map builds over the stock road here
 ```
 
+### 5. How each vehicle drives
+
+```sh
+python navtools/dnav.py vehicles navmesh/vehicles.dnv --gta "C:/Games/GTA San Andreas"
+```
+
+This reads the game's `data/handling.cfg` and `data/vehicles.ide` and writes each
+model's top speed, acceleration, braking, cornering grip and turning circle.
+Without it every car drives as the same average car. The conversion from the
+game's units is an estimate: if a model feels wrong, set it from your script with
+`Nav_SetVehicleHandling`.
+
 ### Checking a bake
 
 ```sh
@@ -162,6 +179,31 @@ script moved it, it left the driver's seat, died or was destroyed). A driver mus
 be in seat 0; `carZ` is how high the car's centre sits over the road (1.0 for a
 car, more for a truck).
 
+**How cars drive.** A driver steers like a car: it looks ahead along its path,
+turns no tighter than its turning circle (nor, at speed, than its grip holds),
+pulls away as its handling allows (the pull fades towards its top speed) and
+brakes in time to take each corner, junction or lower limit at the speed it
+allows, then to stop at the end. What sets the speed:
+
+- **The road's class**, read from GTA's path data, each with a limit you can change
+  with `Nav_SetRoadSpeed` (km/h): `NAV_CLASS_HIGHWAY` 130, `NAV_CLASS_MAIN` 80 (two
+  or more lanes each way, or one-way), `NAV_CLASS_STREET` 60, `NAV_CLASS_MINOR` 45
+  (GTA's low-traffic roads), `NAV_CLASS_SERVICE` 30 (emergency-only roads) and
+  `NAV_CLASS_OFFROAD` 60 (the car navmesh). A custom roads file marks its own with
+  `main` / `minor` on a node.
+- **The car**, from `vehicles.dnv` or `Nav_SetVehicleHandling`.
+- **The style**, `Nav_SetDriveStyle(npcid, style)`: `NAV_STYLE_CAUTIOUS` (under the
+  limits, gentle), `NAV_STYLE_NORMAL` (the limits; `Nav_DriveTo`'s default),
+  `NAV_STYLE_FAST` (a quarter over, brisk corners, late braking) and
+  `NAV_STYLE_PURSUIT` (no limits at all: as fast as the car and the corners allow;
+  `Nav_Chase`'s default).
+- **A cap**, if you pass a `speed` above 0 to `Nav_DriveTo` or `Nav_Chase`
+  (in `NPC_Move`'s units: 1.0 is 10 m/s).
+
+`Nav_GetDriveInfo` tells you how a driver is doing: its speed, the speed it is going
+for, the road it is on and that road's limit. With the improved NPC component a
+car also backs up to turn round in a tight spot.
+
 **Chase.** `Nav_Chase(npcid, targetid, speed, carZ)` keeps a driver after a player
 (or another NPC) until `Nav_Stop`. It follows the roads while the target is on one,
 the car navmesh once it leaves them, and drives straight at the target when it is
@@ -179,7 +221,8 @@ line of sight; that needs the full collision mesh (ColAndreas).
 **Or take the points.** `Nav_RequestPath` (walking) and `Nav_RequestRoute`
 (driving) return a request id; `OnNavPathResult(requestid, status, points)` follows
 on a later tick. Read the points with `Nav_GetPathPoint` (and, for routes, each
-point's speed factor with `Nav_GetPathPointSpeed`) inside that callback.
+point's speed factor with `Nav_GetPathPointSpeed` and road class with
+`Nav_GetPathPointClass`) inside that callback.
 
 Road flags: `NAV_ROAD_EMERGENCY` lets a route use emergency-only roads;
 `NAV_ROAD_BOATS` searches the water routes instead (for boats).
@@ -230,9 +273,9 @@ CI runs all of it on every push.
 
 ## Good to know
 
-- Cars driven by NPCs slide from point to point at the speed you give: there is no
-  physics on the server. They don't stop for traffic or players; that's up to your
-  script.
+- There is no physics on the server: DiamondNav drives the car as a driver would
+  (speed, turning, braking), but it does not crash, skid or get pushed. Drivers
+  don't stop for traffic or players yet; that's up to your script.
 - How GTA's path files mark lane direction and median width is read from the files
   as documented by the community, and has not been checked against every road.
   If a car drives on the wrong side somewhere, please open an issue with the place.

@@ -6,6 +6,8 @@
 //   *.nav       where peds can walk, and where a car fits off the road (navbake
 //               --agent ped or car; dnav.py world bakes both)
 //   roads.dnr   where cars can drive (built with tools/dnav.py roads)
+//   vehicles.dnv how each vehicle model drives (tools/dnav.py vehicles, from the
+//               game's handling.cfg; without it every car drives alike)
 // and searches paths on its own threads, so a search never holds up the server.
 //
 // Two ways to use it:
@@ -22,7 +24,7 @@
 #endif
 #define _DiamondNav_included
 
-#define DIAMONDNAV_INCLUDE_VERSION      (10102)     // 1.1.2
+#define DIAMONDNAV_INCLUDE_VERSION      (10200)     // 1.2.0
 
 // ── Results ──────────────────────────────────────────────────────────────────
 
@@ -52,6 +54,22 @@
 #define NAV_MESH_PED            (0)
 #define NAV_MESH_CAR            (1)
 
+// Road classes, each with its own speed limit (Nav_SetRoadSpeed). Read from GTA's own
+// path data: its highway flag, the lanes each way and its traffic level.
+#define NAV_CLASS_HIGHWAY       (0)     // freeways (default limit 130 km/h)
+#define NAV_CLASS_MAIN          (1)     // two or more lanes each way, or one-way (80)
+#define NAV_CLASS_STREET        (2)     // one lane each way (60)
+#define NAV_CLASS_MINOR         (3)     // GTA's low-traffic roads: back streets, country lanes (45)
+#define NAV_CLASS_SERVICE       (4)     // emergency-only roads: aprons, yards, car parks (30)
+#define NAV_CLASS_OFFROAD       (5)     // off the roads, on the car navmesh (60)
+
+// How a driver drives (Nav_SetDriveStyle).
+#define NAV_STYLE_CAUTIOUS      (0)     // under the limits, gentle corners, early braking
+#define NAV_STYLE_NORMAL        (1)     // the limits, comfortable corners (Nav_DriveTo's default)
+#define NAV_STYLE_FAST          (2)     // a quarter over the limits, brisk corners, late braking
+#define NAV_STYLE_PURSUIT       (3)     // no limits: as fast as the car and the corners allow
+                                        // (Nav_Chase's default)
+
 // ── Information ──────────────────────────────────────────────────────────────
 
 // Navmesh tiles loaded (25.6 m squares walking, 64 m for cars); 0 without that navmesh.
@@ -70,11 +88,13 @@ native Nav_GetPendingCount();
 // Returns false when the NPC does not exist or the search queue is full.
 native bool:Nav_WalkTo(npcid, Float:x, Float:y, Float:z, moveType = 1, Float:speed = -1.0);
 
-// Drives an NPC's car to a point along the roads, in its lane, slowing for
-// corners. The NPC must be the driver. speed is NPC_MOVE_TYPE_DRIVE's (1.0 is
-// about 10 m/s) on the straight; carZ is how far the car's centre sits above the
-// road (about 1.0 for a car; more for a truck or bus).
-native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 1.0, Float:carZ = 1.0, flags = 0);
+// Drives an NPC's car to a point along the roads, in its lane. The NPC must be the
+// driver. It drives like its car (vehicles.dnv) in its style (Nav_SetDriveStyle):
+// up to each road's speed limit, slowing for corners and junctions in time, and
+// braking to a stop at the end. speed, if above 0, caps it in NPC_MOVE_TYPE_DRIVE's
+// units (1.0 is 10 m/s); carZ is how far the car's centre sits above the road
+// (about 1.0 for a car; more for a truck or bus).
+native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, Float:carZ = 1.0, flags = 0);
 
 // Chases a player (or another NPC) with an NPC's car until Nav_Stop. Far off, it
 // follows the roads while the target is on them, and the car navmesh once the target
@@ -82,8 +102,9 @@ native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 1.0, Flo
 // target is going, and it stops beside a target that stops. It re-plans as the
 // target moves, without pausing. The NPC must be the driver. Ends with
 // NAV_END_LOST when the target leaves or changes world. What the NPCs do in the
-// chase (shoot, ram, give up) is the script's.
-native bool:Nav_Chase(npcid, targetid, Float:speed = 1.4, Float:carZ = 1.0);
+// chase (shoot, ram, give up) is the script's. It drives in NAV_STYLE_PURSUIT unless
+// the NPC has a style of its own; speed, if above 0, caps it (as Nav_DriveTo's).
+native bool:Nav_Chase(npcid, targetid, Float:speed = 0.0, Float:carZ = 1.0);
 
 // Stops a Nav_WalkTo, Nav_DriveTo or Nav_Chase where the NPC is (OnNavMoveEnd:
 // NAV_END_STOPPED).
@@ -91,6 +112,33 @@ native bool:Nav_Stop(npcid);
 
 // Whether a Nav_WalkTo, Nav_DriveTo or Nav_Chase is under way (or searching).
 native bool:Nav_IsMoving(npcid);
+
+// ── How cars drive ───────────────────────────────────────────────────────────
+
+// An NPC's driving style (NAV_STYLE_*), kept until the NPC is destroyed; it applies
+// at once to a drive or chase under way. Nav_GetDriveStyle is -1 for an NPC that has
+// none (Nav_DriveTo then drives normally, Nav_Chase in pursuit).
+native bool:Nav_SetDriveStyle(npcid, style);
+native Nav_GetDriveStyle(npcid);
+
+// A road class's speed limit (NAV_CLASS_*), in km/h, for every driver.
+native bool:Nav_SetRoadSpeed(roadClass, Float:kmh);
+native Float:Nav_GetRoadSpeed(roadClass);
+
+// How a vehicle model drives: top speed (km/h), acceleration and hardest braking
+// (m/s^2), the most sideways acceleration it holds in a corner (m/s^2) and its
+// tightest turning circle (m). Setting it overrides vehicles.dnv for that model.
+// Without either, a model drives as an average car.
+native bool:Nav_SetVehicleHandling(modelid, Float:topKmh, Float:accel, Float:brake, Float:grip, Float:radius);
+native bool:Nav_GetVehicleHandling(modelid, &Float:topKmh, &Float:accel, &Float:brake, &Float:grip, &Float:radius);
+
+// Vehicle models vehicles.dnv gave handling for; 0 without it.
+native Nav_GetVehicleModelCount();
+
+// A driver under way: its speed, the speed it is going for (the road, the next
+// corner, the end), the class of road it is on and that road's limit. False when the
+// NPC is not driving with DiamondNav.
+native bool:Nav_GetDriveInfo(npcid, &Float:speedKmh, &Float:wantKmh, &roadClass, &Float:limitKmh, &bool:reversing);
 
 // ── Searching ────────────────────────────────────────────────────────────────
 
@@ -108,6 +156,9 @@ native bool:Nav_GetPathPoint(requestid, index, &Float:x, &Float:y, &Float:z);
 // A route point's speed, 0.0 .. 1.0 of cruising speed (lower in corners and at
 // the end). Walking paths are always 1.0.
 native Float:Nav_GetPathPointSpeed(requestid, index);
+
+// A route point's road class (NAV_CLASS_*); -1 for a walking path.
+native Nav_GetPathPointClass(requestid, index);
 
 // ── Points ───────────────────────────────────────────────────────────────────
 

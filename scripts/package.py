@@ -63,7 +63,8 @@ def main():
     put(REPO / "THIRD_PARTY.md", "THIRD_PARTY.md")
     (root / "navmesh").mkdir()
     (root / "navmesh" / "PUT_BAKED_FILES_HERE.txt").write_text(
-        "world.nav (navbake) and roads.dnr (dnav.py roads) go here. See README.md.\n")
+        "world.nav and world_car.nav (navbake), roads.dnr (dnav.py roads) and vehicles.dnv\n"
+        "(dnav.py vehicles) go here. See README.md.\n")
 
     if plat == "windows":
         archive = out / f"{name}.zip"

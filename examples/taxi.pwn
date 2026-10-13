@@ -32,7 +32,9 @@ public OnPlayerCommandText(playerid, cmdtext[])
         NPC_PutInVehicle(gDriver, gTaxi, 0);
     }
     gCaller = playerid;
-    if (Nav_DriveTo(gDriver, x, y, z, 1.2)) SendClientMessage(playerid, -1, "Your taxi is on its way.");
+    // A taxi driver in a hurry: a little over the limits.
+    Nav_SetDriveStyle(gDriver, NAV_STYLE_FAST);
+    if (Nav_DriveTo(gDriver, x, y, z)) SendClientMessage(playerid, -1, "Your taxi is on its way.");
     return 1;
 }
 

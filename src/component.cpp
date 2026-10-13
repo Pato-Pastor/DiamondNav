@@ -18,9 +18,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <thread>
 #include <unordered_map>
 
+#include "driving.hpp"
 #include "pathfinder.hpp"
 
 #ifndef DNAV_VERSION_MAJOR
@@ -39,28 +41,28 @@ constexpr float DRIVE_STOP = 1.5f;
 constexpr float DRIVE_MIN_SPEED = 0.25f;        // NPC_MOVE_TYPE_DRIVE speed floor in corners
 
 // Driving: the component steers the car itself, like a driver, instead of sliding it
-// from point to point. Every DRIVE_TICK it looks a little way down the path, turns
-// toward that point no faster than the car could, speeds up or brakes gently, and
-// hands NPC_Move a target just ahead, on the ground.
+// from point to point. Each time it looks a little way down the path, turns toward
+// that point no faster than the car could, speeds up or brakes as the car and the
+// road allow (driving.hpp: handling, speed limits, styles, the speed plan), and hands
+// NPC_Move a target just ahead, on the ground.
 // NPC_Move restarts the NPC's clock, so a move sent between two NPC updates loses the
 // time since the last one: drive() runs right after each NPC update instead (the
 // NPC's position changed), or after DRIVE_IDLE when it stands still.
 constexpr auto DRIVE_IDLE = std::chrono::milliseconds(120);
 constexpr float SPEED_UNIT = 10.0f;     // m/s per NPC_MOVE_TYPE_DRIVE speed 1.0
-constexpr float ACCEL = 4.0f;           // m/s per second
-constexpr float BRAKE = 7.0f;
-constexpr float TURN_RADIUS = 6.5f;     // the tightest circle the car drives, metres
 constexpr float TURN_MIN_SPEED = 3.0f;  // never slower than this while it still has to turn
 constexpr float LOOK_MIN = 4.0f;        // how far down the path it aims: 4 m at a crawl...
 constexpr float LOOK_TIME = 0.6f;       // ...plus 0.6 s of travel
-constexpr float LOOK_MAX = 16.0f;
+constexpr float LOOK_MAX = 24.0f;
+constexpr float PASSED_CORNER = 3.0f;   // still this near the point it passed, it keeps that point's speed
+constexpr float SCAN_EXTRA = 20.0f;     // looks for slower points this far past its braking distance
 constexpr float AHEAD_TIME = 0.5f;      // NPC_Move's target: this far ahead of the car
 constexpr float AHEAD_MIN = 3.0f;
 constexpr float ARRIVE = 2.5f;          // a drive ends this near its last point
 constexpr float GROUND_REACH = 3.0f;    // how far up or down the car mesh's ground is looked for
-constexpr float REVERSE_SPEED = 4.0f;   // m/s backing up
+constexpr float REVERSE_SPEED = 4.0f;   // m/s backing up (or less: a third of the car's top speed)
 constexpr float REVERSE_BEHIND = 100.0f; // backs up when the point it aims at is further round than this...
-constexpr float REVERSE_NEAR = 16.0f;   // ...and nearer than this (a forward U-turn is 13 m across)
+constexpr float REVERSE_NEAR = 2.5f;    // ...and nearer than this many turning radii (a U-turn is two across)
 constexpr float REVERSE_INSIDE = 60.0f; // or this far round and inside its turning circle
 constexpr float REVERSE_DONE = 40.0f;   // drives forward again once it points this near the aim
 constexpr float REVERSE_MAX = 12.0f;    // backs up at most this far at a time
@@ -110,6 +112,14 @@ struct Mover {
     float carZ = 1.0f;                  // Drive: the car's centre over the road
     std::vector<Vector3> points;
     std::vector<float> speeds;
+    // Driving: each point's road class, whether it is in a junction, the fastest the
+    // car may go there (m/s, the speed plan) and the distance along the path to it.
+    std::vector<dnav::RoadClass> classes;
+    std::vector<uint8_t> junctions;
+    std::vector<float> limits, cum;
+    dnav::Handling car;                 // the car's handling, read when the path is set
+    dnav::DriveStyle style = dnav::DriveStyle::Normal;
+    float wantSpeed = 0.0f;             // the speed it is going for (Nav_GetDriveInfo)
     size_t next = 0;
     Vector3 target {};
 
@@ -145,6 +155,8 @@ public:
     static DiamondNav* instance;
 
     dnav::Pathfinder finder;
+    dnav::Driving drivingModel;         // handling, speed limits, the speed plan
+    std::unordered_map<int, dnav::DriveStyle> styles;   // Nav_SetDriveStyle, by NPC
     bool canReverse_ = true;            // the NPC component backs cars up (our patched build)
     // The result being handed to a script right now (Nav_GetPathPoint reads it).
     const dnav::PathResult* current = nullptr;
@@ -175,6 +187,7 @@ public:
             if (line.rfind("ERROR: ", 0) == 0) core_->logLn(LogLevel::Error, "[nav] %s", line.c_str() + 7);
             else core_->printLn("[nav] %s", line.c_str());
         }
+        loadVehicles();
         const unsigned hw = std::thread::hardware_concurrency();
         const int threads = static_cast<int>(std::clamp(hw > 1 ? hw - 1 : 1u, 1u, 4u));
         if (finder.loaded()) finder.start(threads);
@@ -183,6 +196,30 @@ public:
             finder.tileCount(dnav::MeshKind::Car), static_cast<int>(finder.roads().nodeCount()),
             finder.loaded() ? threads : 0);
         core_->getEventDispatcher().addEventHandler(this);
+    }
+
+    void loadVehicles()
+    {
+        const std::string path = std::string(NAV_FOLDER) + "/vehicles.dnv";
+        if (!std::ifstream(path)) {
+            core_->printLn("[nav] no vehicles.dnv: every car drives alike (tools/dnav.py vehicles makes it from GTA)");
+            return;
+        }
+        std::string error;
+        if (drivingModel.loadVehicles(path, error)) {
+            core_->printLn("[nav] loaded vehicles.dnv: %d vehicle models", static_cast<int>(drivingModel.vehicleCount()));
+        } else {
+            core_->logLn(LogLevel::Error, "[nav] %s", error.c_str());
+        }
+    }
+
+    // The style npc drives in: its own (Nav_SetDriveStyle), else pursuit for a chase
+    // and normal for anything else.
+    dnav::DriveStyle styleOf(int npcid, bool chase) const
+    {
+        auto it = styles.find(npcid);
+        if (it != styles.end()) return it->second;
+        return chase ? dnav::DriveStyle::Pursuit : dnav::DriveStyle::Normal;
     }
 
     void onInit(IComponentList* components) override
@@ -288,6 +325,7 @@ public:
         m.moveType = driving(kind) ? NPCMoveType_Drive : moveType;
         m.speed = speed;
         m.carZ = carZ;
+        m.style = styleOf(npcid, false);
         movers_[npcid] = std::move(m);
         byRequest_[id] = npcid;
         return true;
@@ -312,6 +350,42 @@ public:
     }
 
     bool isMoving(int npcid) const { return movers_.count(npcid) != 0; }
+
+    // Nav_SetDriveStyle: from now on, and for the drive it is on.
+    void setStyle(int npcid, dnav::DriveStyle style)
+    {
+        styles[npcid] = style;
+        auto it = movers_.find(npcid);
+        if (it == movers_.end() || !driving(it->second.kind)) return;
+        Mover& m = it->second;
+        m.style = style;
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        if (npc && npc->getVehicle() && !m.points.empty()) planSpeeds(m, *npc->getVehicle());
+    }
+
+    // A rescan of every driver's plan: speed limits or a model's handling changed.
+    void replanAll()
+    {
+        for (auto& [id, m] : movers_) {
+            if (!driving(m.kind) || m.points.empty()) continue;
+            INPC* npc = npcs_ ? npcs_->get(id) : nullptr;
+            if (npc && npc->getVehicle()) planSpeeds(m, *npc->getVehicle());
+        }
+    }
+
+    // Nav_GetDriveInfo: how a driver is doing right now.
+    bool driveInfo(int npcid, float& speed, float& want, dnav::RoadClass& cls, float& limit, bool& reversing) const
+    {
+        auto it = movers_.find(npcid);
+        if (it == movers_.end() || !driving(it->second.kind)) return false;
+        const Mover& m = it->second;
+        speed = m.v;
+        want = m.wantSpeed;
+        cls = m.seg + 1 < m.classes.size() ? m.classes[m.seg + 1] : m.classes.empty() ? dnav::RoadClass::Street : m.classes.back();
+        limit = drivingModel.limit(cls);
+        reversing = m.reversing;
+        return true;
+    }
 
     void startMoving(int npcid, const dnav::PathResult& r)
     {
@@ -344,15 +418,38 @@ public:
         }
         m.points.clear();
         m.speeds.clear();
+        m.classes.clear();
+        m.junctions.clear();
+        const dnav::RoadClass first = r.classes.empty() ? dnav::RoadClass::Street : r.classes.front();
         m.points.push_back(car->getPosition());
         m.speeds.push_back(1.0f);
+        m.classes.push_back(first);
+        m.junctions.push_back(0);
         for (size_t i = 0; i < r.points.size(); i++) {
             const auto& p = r.points[i];
             m.points.push_back(Vector3(p.x, p.y, p.z + m.carZ));
             m.speeds.push_back(i < r.speeds.size() ? r.speeds[i] : 1.0f);
+            m.classes.push_back(i < r.classes.size() ? r.classes[i] : first);
+            m.junctions.push_back(i < r.junctions.size() ? r.junctions[i] : 0);
         }
         m.seg = 0;
         m.ground = r.kind == dnav::PathKind::OffRoad && finder.meshLoaded(dnav::MeshKind::Car);
+        planSpeeds(m, *car);
+    }
+
+    // The speed plan for m's path in this car (driving.hpp), and the distance along it.
+    void planSpeeds(Mover& m, IVehicle& car)
+    {
+        m.car = drivingModel.handling(car.getModel());
+        std::vector<dnav::Point> pts;
+        pts.reserve(m.points.size());
+        for (const auto& p : m.points) pts.push_back(dnav::Point { p.x, p.y, p.z });
+        m.classes.resize(m.points.size(), m.classes.empty() ? dnav::RoadClass::Street : m.classes.back());
+        m.junctions.resize(m.points.size(), 0);
+        m.limits = drivingModel.plan(pts, m.classes, m.junctions, m.car, m.style, m.speed > 0.0f ? m.speed * SPEED_UNIT : 0.0f);
+        m.cum.assign(m.points.size(), 0.0f);
+        for (size_t i = 1; i < m.points.size(); i++)
+            m.cum[i] = m.cum[i - 1] + glm::distance(Vector2(m.points[i - 1]), Vector2(m.points[i]));
     }
 
     static float wrap180(float a)
@@ -421,9 +518,8 @@ public:
             }
             m.seg = best;
             const Vector3 at = m.points[best] + (m.points[best + 1] - m.points[best]) * bestT;
-            remaining = glm::distance(Vector2(at), Vector2(m.points[best + 1]));
-            for (size_t i = best + 1; i + 1 < n; i++)
-                remaining += glm::distance(Vector2(m.points[i]), Vector2(m.points[i + 1]));
+            const float here = m.cum[best] + (m.cum[best + 1] - m.cum[best]) * bestT;   // along the path
+            remaining = m.cum[n - 1] - here;
 
             if (!m.chase && remaining < ARRIVE) {
                 npc->stopMove();
@@ -446,24 +542,27 @@ public:
             const float want = glm::degrees(std::atan2(-(aim.x - pos.x), aim.y - pos.y));
             error = wrap180(want - m.heading);
 
-            // The slowest the path asks for over the next stretch (corners, the end).
-            // Each corner ahead caps the speed at what still lets the car brake down to
-            // that corner's speed by the time it gets there.
-            const float cruise = m.speed * SPEED_UNIT;
-            target = cruise;
-            float dist = glm::distance(Vector2(at), Vector2(m.points[best + 1]));
-            for (size_t i = best + 1; i < n && dist < 80.0f; i++) {
-                if (i > best + 1) dist += glm::distance(Vector2(m.points[i - 1]), Vector2(m.points[i]));
-                if (i >= m.speeds.size()) continue;
-                const float corner = cruise * std::max(m.speeds[i], 0.2f);
-                target = std::min(target, std::sqrt(corner * corner + 2.0f * BRAKE * 0.6f * dist));
-            }
-            // Slow down to turn, but keep enough speed to get round.
+            // How fast: no faster than the speed plan allows here, nor than lets it brake
+            // down to each slower point ahead (a corner, a junction, a lower limit) by the
+            // time it gets there, with the share of its brakes its style plans with.
+            const dnav::StyleUse& use = dnav::styleUse(m.style);
+            const float brakePlan = m.car.brake * use.brake;
+            // The road it is on (a point carries the class of the stretch leading to it).
+            target = drivingModel.roadSpeed(m.classes[best + 1], m.car, m.style, m.speed > 0.0f ? m.speed * SPEED_UNIT : 0.0f);
+            if (glm::distance(Vector2(at), Vector2(m.points[best])) < PASSED_CORNER) target = std::min(target, m.limits[best]);
+            const float scan = m.v * m.v / (2.0f * brakePlan) + SCAN_EXTRA;
+            for (size_t i = best + 1; i < n && m.cum[i] - here <= scan; i++)
+                target = std::min(target, std::sqrt(m.limits[i] * m.limits[i] + 2.0f * brakePlan * (m.cum[i] - here)));
+            // Turning toward the aim follows an arc through it: no faster than the car's
+            // grip holds on that arc, but fast enough to get round.
             const float abs = std::fabs(error);
-            if (abs > 15.0f) target *= std::max(0.3f, std::cos(glm::radians(std::min(abs, 75.0f))));
+            if (abs > 3.0f) {
+                const float arc = look / (2.0f * std::sin(glm::radians(std::min(abs, 90.0f))));
+                target = std::min(target, std::sqrt(m.car.grip * use.grip * std::max(arc, m.car.radius)));
+            }
             if (abs > 30.0f) target = std::max(target, TURN_MIN_SPEED);
             // Brake to stop at the end.
-            target = std::min(target, std::sqrt(2.0f * BRAKE * 0.6f * std::max(0.0f, remaining - ARRIVE * 0.5f)));
+            target = std::min(target, std::sqrt(2.0f * brakePlan * std::max(0.0f, remaining - ARRIVE * 0.5f)));
             ahead2 = Vector3(aim);
 
             // Backing up. A car can't turn on the spot: a point behind it and near, or
@@ -475,8 +574,9 @@ public:
             const float hr = glm::radians(m.heading);
             const Vector2 fwd(-std::sin(hr), std::cos(hr));
             const Vector2 left(-fwd.y, fwd.x);
-            const Vector2 centre = Vector2(pos) + left * (glm::dot(to, left) >= 0.0f ? TURN_RADIUS : -TURN_RADIUS);
-            const bool inside = glm::distance(Vector2(aim), centre) < TURN_RADIUS * 0.95f;
+            const float turnR = m.car.radius;
+            const Vector2 centre = Vector2(pos) + left * (glm::dot(to, left) >= 0.0f ? turnR : -turnR);
+            const bool inside = glm::distance(Vector2(aim), centre) < turnR * 0.95f;
             // open.mp's own NPC component only drives forward (our patched build backs up):
             // a car told to back up that moves forward instead means it never will.
             if (m.reversing && m.v > 1.0f) {
@@ -493,7 +593,7 @@ public:
             if (!m.reversing) {
                 if (abs2 > CIRCLING_TURN && m.v > 1.0f) m.circling += dt;
                 else if (abs2 < CIRCLING_TURN * 0.5f) m.circling = 0.0f;
-                back = (abs2 > REVERSE_BEHIND && d < REVERSE_NEAR) || (abs2 > REVERSE_INSIDE && inside)
+                back = (abs2 > REVERSE_BEHIND && d < REVERSE_NEAR * turnR) || (abs2 > REVERSE_INSIDE && inside)
                     || m.circling > CIRCLING_SECS;
             } else if (abs2 < REVERSE_DONE || m.backed > REVERSE_MAX) {
                 back = false;
@@ -517,19 +617,30 @@ public:
                     m.circling = 0.0f;
                 }
             } else if (m.reversing) {
-                target = std::min(REVERSE_SPEED, std::max(target, TURN_MIN_SPEED));
+                target = std::min(std::min(REVERSE_SPEED, m.car.top / 3.0f), std::max(target, TURN_MIN_SPEED));
             }
         }
 
-        m.v += std::clamp(target - m.v, -BRAKE * dt, ACCEL * dt);
+        // Pulling away fades towards the car's top speed, as in GTA; braking is as hard
+        // as the car can when it must (the plan itself only counts on its style's share).
+        m.wantSpeed = target;
+        if (target > m.v) {
+            const float r = m.v / m.car.top;
+            const float pull = m.car.accel * dnav::styleUse(m.style).accel * std::max(0.2f, 1.0f - r * r);
+            m.v = std::min(target, m.v + pull * dt);
+        } else {
+            m.v = std::max(target, m.v - m.car.brake * dt);
+        }
         m.v = std::max(0.0f, m.v);
         if (m.v < 0.3f && target < 0.3f) {
             m.v = 0.0f;
             if (npc->isMoving()) npc->stopMove();
             return;
         }
+        // It turns no tighter than its turning circle, nor, at speed, than its grip holds.
         // Backing up, the nose still swings toward the aim: the wheels turn the other way.
-        const float maxYaw = glm::degrees(std::max(m.v, TURN_MIN_SPEED * 0.5f) / TURN_RADIUS);
+        const float turning = std::max(m.car.radius, m.v * m.v / (m.car.grip * 0.95f));
+        const float maxYaw = glm::degrees(std::max(m.v, TURN_MIN_SPEED * 0.5f) / turning);
         m.heading = wrap180(m.heading + std::clamp(error, -maxYaw * dt, maxYaw * dt));
         if (m.reversing) m.backed += m.v * dt;
 
@@ -643,6 +754,7 @@ public:
         m.carZ = carZ;
         m.chase = true;
         m.quarry = quarry;
+        m.style = styleOf(npcid, true);
         movers_[npcid] = std::move(m);
         return true;
     }
@@ -728,6 +840,9 @@ public:
             m.seg = 0;
             m.ground = carMesh;
             m.kind = carMesh ? dnav::PathKind::OffRoad : dnav::PathKind::Drive;
+            m.classes.assign(m.points.size(), carMesh ? dnav::RoadClass::OffRoad : dnav::RoadClass::Street);
+            m.junctions.assign(m.points.size(), 0);
+            planSpeeds(m, *car);
             m.direct = true;
             m.idle = false;
             return;
@@ -782,7 +897,11 @@ public:
 
     void onNPCDeath(INPC& npc, IPlayer*, int) override { end(npc.getID(), END_INTERRUPTED, false); }
 
-    void onNPCDestroy(INPC& npc) override { end(npc.getID(), END_INTERRUPTED, false); }
+    void onNPCDestroy(INPC& npc) override
+    {
+        end(npc.getID(), END_INTERRUPTED, false);
+        styles.erase(npc.getID());
+    }
 
     void onFree(IComponent* component) override
     {
@@ -963,4 +1082,91 @@ SCRIPT_API(Nav_Stop, bool(int npcid))
 SCRIPT_API(Nav_IsMoving, bool(int npcid))
 {
     return DiamondNav::instance && DiamondNav::instance->isMoving(npcid);
+}
+
+// ── How cars drive ───────────────────────────────────────────────────────────
+
+namespace {
+
+constexpr float KMH = 3.6f;
+
+bool validClass(int c)
+{
+    return c >= 0 && c < static_cast<int>(dnav::RoadClass::Count);
+}
+
+} // namespace
+
+SCRIPT_API(Nav_SetDriveStyle, bool(int npcid, int style))
+{
+    if (!DiamondNav::instance || style < 0 || style >= static_cast<int>(dnav::DriveStyle::Count)) return false;
+    DiamondNav::instance->setStyle(npcid, static_cast<dnav::DriveStyle>(style));
+    return true;
+}
+
+SCRIPT_API(Nav_GetDriveStyle, int(int npcid))
+{
+    if (!DiamondNav::instance) return static_cast<int>(dnav::DriveStyle::Normal);
+    auto it = DiamondNav::instance->styles.find(npcid);
+    return it == DiamondNav::instance->styles.end() ? -1 : static_cast<int>(it->second);
+}
+
+SCRIPT_API(Nav_SetRoadSpeed, bool(int roadClass, float kmh))
+{
+    if (!DiamondNav::instance || !validClass(roadClass) || !(kmh > 0.0f)) return false;
+    DiamondNav::instance->drivingModel.setLimit(static_cast<dnav::RoadClass>(roadClass), kmh / KMH);
+    DiamondNav::instance->replanAll();
+    return true;
+}
+
+SCRIPT_API(Nav_GetRoadSpeed, float(int roadClass))
+{
+    if (!DiamondNav::instance || !validClass(roadClass)) return 0.0f;
+    return DiamondNav::instance->drivingModel.limit(static_cast<dnav::RoadClass>(roadClass)) * KMH;
+}
+
+SCRIPT_API(Nav_SetVehicleHandling, bool(int model, float topKmh, float accel, float brake, float grip, float radius))
+{
+    if (!DiamondNav::instance || !(topKmh > 0.0f && accel > 0.0f && brake > 0.0f && grip > 0.0f && radius > 0.0f))
+        return false;
+    DiamondNav::instance->drivingModel.setHandling(model, dnav::Handling { topKmh / KMH, accel, brake, grip, radius });
+    DiamondNav::instance->replanAll();
+    return true;
+}
+
+SCRIPT_API(Nav_GetVehicleHandling, bool(int model, float& topKmh, float& accel, float& brake, float& grip, float& radius))
+{
+    const dnav::Handling h = DiamondNav::instance ? DiamondNav::instance->drivingModel.handling(model) : dnav::Handling {};
+    topKmh = h.top * KMH;
+    accel = h.accel;
+    brake = h.brake;
+    grip = h.grip;
+    radius = h.radius;
+    return DiamondNav::instance != nullptr;
+}
+
+SCRIPT_API(Nav_GetVehicleModelCount, int())
+{
+    return DiamondNav::instance ? static_cast<int>(DiamondNav::instance->drivingModel.vehicleCount()) : 0;
+}
+
+SCRIPT_API(Nav_GetPathPointClass, int(int requestid, int index))
+{
+    const dnav::PathResult* r = DiamondNav::instance ? DiamondNav::instance->current : nullptr;
+    if (!r || r->id != requestid || index < 0 || index >= static_cast<int>(r->classes.size())) return -1;
+    return static_cast<int>(r->classes[index]);
+}
+
+SCRIPT_API(Nav_GetDriveInfo, bool(int npcid, float& speedKmh, float& wantKmh, int& roadClass, float& limitKmh, bool& reversing))
+{
+    float speed = 0.0f, want = 0.0f, limit = 0.0f;
+    dnav::RoadClass cls = dnav::RoadClass::Street;
+    bool back = false;
+    if (!DiamondNav::instance || !DiamondNav::instance->driveInfo(npcid, speed, want, cls, limit, back)) return false;
+    speedKmh = speed * KMH;
+    wantKmh = want * KMH;
+    roadClass = static_cast<int>(cls);
+    limitKmh = limit * KMH;
+    reversing = back;
+    return true;
 }

@@ -12,7 +12,7 @@ native (or a few) that a script calls on an NPC it already made.
 - `Nav_RequestPath` / `Nav_RequestRoute`: the same searches, with the points handed
   to the script.
 
-## 1.1: chasing
+## 1.1: chasing (done)
 
 - **`Nav_Chase(npcid, targetid, speed, flags)`**: a driver follows a player (or
   another NPC) until `Nav_Stop`. The component re-plans as the target moves, and
@@ -32,7 +32,23 @@ native (or a few) that a script calls on an NPC it already made.
   line of sight through windows and fences needs the full collision mesh; that stays
   ColAndreas' job, which a gamemode can use alongside DiamondNav.)
 
-## 1.2: traffic
+## 1.1.1-1.1.2 (done)
+
+- Drivers steer like cars: a lookahead point, a turning circle, smooth speed, the
+  car navmesh's ground off the road, and backing up to turn round.
+
+## 1.2: driving like a car (done)
+
+- Road classes from GTA's own path data (highway, main, street, minor, service), each
+  with a speed limit (`Nav_SetRoadSpeed`).
+- Each vehicle's handling from the game's `handling.cfg` (`dnav.py vehicles`):
+  top speed, acceleration, braking, grip, turning circle (`Nav_SetVehicleHandling`).
+- A speed plan along every path: limits, corners by the car's grip, junctions, and
+  braking in time for each.
+- Driving styles (`Nav_SetDriveStyle`): cautious, normal, fast, pursuit.
+- `Nav_GetDriveInfo`, `Nav_GetPathPointClass`.
+
+## 1.3: traffic
 
 - **`Nav_Cruise(npcid, speed, flags)`**: a driver drives around the road network on
   its own, picking turns at random (or towards an area), in its lane.
@@ -41,7 +57,7 @@ native (or a few) that a script calls on an NPC it already made.
   - Ends only on `Nav_Stop`, or when the NPC leaves the car.
 - `Nav_DriveTo` gets the same spacing and junction behaviour.
 
-## 1.3: pedestrians
+## 1.4: pedestrians
 
 - **`Nav_Wander(npcid, radius, flags)`**: a ped walks to random points around it,
   preferring sidewalks; the walking navmesh marks road surface as costly (from

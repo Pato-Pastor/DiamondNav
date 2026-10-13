@@ -34,6 +34,20 @@ float len2d(float x, float y)
 
 } // namespace
 
+RoadClass RoadGraph::classOf(uint32_t from, const RoadEdge& e) const
+{
+    // Both ends must agree for the faster classes: a slip road off a highway is not one.
+    const uint16_t a = nodes_[from].flags, b = nodes_[e.to].flags;
+    const uint16_t both = a & b, either = a | b;
+    if (either & ROAD_EMERGENCY_ONLY) return RoadClass::Service;
+    if (both & ROAD_HIGHWAY) return RoadClass::Highway;
+    if (either & ROAD_MINOR) return RoadClass::Minor;
+    if ((both & ROAD_MAIN) || e.lanes >= 2 || e.lanesBack >= 2) return RoadClass::Main;
+    // GTA's low traffic level marks back streets and country lanes.
+    if ((both & ROAD_DETAIL) && ((a & ROAD_TRAFFIC) >> 4) == 3 && ((b & ROAD_TRAFFIC) >> 4) == 3) return RoadClass::Minor;
+    return RoadClass::Street;
+}
+
 bool RoadGraph::load(const std::string& path, std::string& error)
 {
     std::ifstream in(path, std::ios::binary);
@@ -243,13 +257,15 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
 
     if (chain.size() == 1) {
         const RoadNode& a = nodes_[chain[0]];
-        out.push_back({ a.x, a.y, a.z, 0.5f });
+        out.push_back({ a.x, a.y, a.z, 0.5f, RoadClass::Street });
         return RouteStatus::Ok;
     }
 
     // Each leg in its lane: shifted to the right of the direction of travel.
     struct Leg {
         float ax, ay, az, bx, by, bz, dx, dy, len;
+        RoadClass cls;
+        bool junction;          // its end node is a junction
     };
     std::vector<Leg> legs;
     for (size_t i = 0; i + 1 < chain.size(); i++) {
@@ -263,11 +279,12 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         dy /= len;
         const float off = e ? laneOffset(*e) : 0.0f;
         const float rx = dy * off, ry = -dx * off;      // the right-hand side
-        legs.push_back({ a.x + rx, a.y + ry, a.z, b.x + rx, b.y + ry, b.z, dx, dy, len });
+        legs.push_back({ a.x + rx, a.y + ry, a.z, b.x + rx, b.y + ry, b.z, dx, dy, len,
+            e ? classOf(chain[i], *e) : RoadClass::Street, b.edgeCount >= 3 });
     }
     if (legs.empty()) {
         const RoadNode& a = nodes_[chain.back()];
-        out.push_back({ a.x, a.y, a.z, 0.5f });
+        out.push_back({ a.x, a.y, a.z, 0.5f, RoadClass::Street });
         return RouteStatus::Ok;
     }
 
@@ -309,13 +326,15 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         last.len = t1;
     }
 
-    out.push_back({ legs[0].ax, legs[0].ay, legs[0].az, 1.0f });
+    out.push_back({ legs[0].ax, legs[0].ay, legs[0].az, 1.0f, legs[0].cls });
     for (size_t i = 0; i + 1 < legs.size(); i++) {
         const Leg& p = legs[i];
         const Leg& q = legs[i + 1];
         const float turn = std::acos(std::clamp(p.dx * q.dx + p.dy * q.dy, -1.0f, 1.0f)) * 57.29578f;
+        // Round a corner at the slower road's class.
+        const RoadClass cls = std::max(p.cls, q.cls);
         if (turn < 4.0f) {
-            out.push_back({ p.bx, p.by, p.bz, 1.0f });
+            out.push_back({ p.bx, p.by, p.bz, 1.0f, p.cls, p.junction });
             continue;
         }
         // Round the corner: a quadratic curve from R before the node on this leg to
@@ -339,11 +358,11 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         for (int k = 0; k <= STEPS; k++) {
             const float t = static_cast<float>(k) / STEPS, u = 1.0f - t;
             out.push_back({ u * u * p0.x + 2 * u * t * p1.x + t * t * p2.x, u * u * p0.y + 2 * u * t * p1.y + t * t * p2.y,
-                u * z0 + t * z2, speed });
+                u * z0 + t * z2, speed, k == 0 ? p.cls : k == STEPS ? q.cls : cls, p.junction && k == STEPS / 2 });
         }
     }
     const Leg& last = legs.back();
-    out.push_back({ last.bx, last.by, last.bz, 0.5f });
+    out.push_back({ last.bx, last.by, last.bz, 0.5f, last.cls });
     // Ease off over the last stretch.
     if (out.size() >= 2) out[out.size() - 2].speed = std::min(out[out.size() - 2].speed, 0.7f);
     return RouteStatus::Ok;

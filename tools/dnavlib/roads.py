@@ -27,12 +27,16 @@ ROADS_MAGIC = 0x44524E44             # "DNRD"
 ROADS_VERSION = 1
 
 HIGHWAY, EMERGENCY_ONLY, BOATS = 1, 2, 4
+DETAIL = 8                           # bits 4-5 hold GTA's traffic level
+TRAFFIC_SHIFT = 4                    # 0 full .. 3 low
+MINOR, MAIN = 0x40, 0x80             # a custom road's class, when its node says
+NODE_WORDS = {"highway": HIGHWAY, "main": MAIN, "minor": MINOR, "emergency": EMERGENCY_ONLY, "boats": BOATS}
 SNAP = 15.0                          # how far "x,y,z" in a roads file may be from a node
 
 ROADS_HELP = """\
 A roads file, one statement per line ('#' starts a comment):
 
-  node NAME X Y Z [highway] [emergency] [boats]
+  node NAME X Y Z [highway|main|minor] [emergency] [boats]
   road A B [LANES [LANES_BACK [MEDIAN]]]
   remove X0 Y0 X1 Y1
 
@@ -43,6 +47,11 @@ road    joins A and B. A and B are node names, or "X,Y,Z" for the nearest
         MEDIAN is the gap in metres between the two directions (default 0).
 remove  drops every stock road node inside the box (and its links), for a map
         that builds over a road. Applied before your nodes are added.
+
+A road's class sets its speed limit (Nav_SetRoadSpeed): highway between two
+highway nodes, main with two or more lanes either way (or between two main
+nodes), minor if either node is minor, a service road if either is emergency,
+otherwise a street.
 """
 
 
@@ -134,7 +143,7 @@ def parse_area(d: bytes) -> Area:
 
 
 def node_flags(f: int) -> int:
-    out = 0
+    out = DETAIL | (((f >> 4) & 3) << TRAFFIC_SHIFT)
     if f & (1 << 13):
         out |= HIGHWAY
     if f & (1 << 8):
@@ -233,13 +242,15 @@ def apply_roads_file(g: Graph, text: str, source: str = "roads"):
             continue
         if kw == "node":
             if len(t) < 5:
-                fail(no, "node takes NAME X Y Z [highway] [emergency] [boats]")
+                fail(no, "node takes NAME X Y Z [highway|main|minor] [emergency] [boats]")
             flags = 0
             for word in t[5:]:
                 w = word.lower()
-                if w not in ("highway", "emergency", "boats"):
+                if w not in NODE_WORDS:
                     fail(no, f"unknown node flag {word!r}")
-                flags |= {"highway": HIGHWAY, "emergency": EMERGENCY_ONLY, "boats": BOATS}[w]
+                flags |= NODE_WORDS[w]
+            if bin(flags & (HIGHWAY | MAIN | MINOR)).count("1") > 1:
+                fail(no, "a node is one of highway, main or minor")
             if t[1] in names:
                 fail(no, f"node {t[1]!r} declared twice")
             try:

@@ -2,7 +2,9 @@
 // one NPC walks across the yard round the wall, another drives along the street
 // and up the one-way road, a third chases a fourth across the yard round the wall
 // on the car navmesh, a fifth turns round by backing up to chase a sixth behind it,
-// and two searches come back through OnNavPathResult.
+// a truck pulls away as slowly as its handling says, and two searches come back
+// through OnNavPathResult. The driver keeps to each road's speed limit: 36 km/h on
+// the street (a main road: two lanes each way), 72 km/h up the one-way road.
 // tests/server/run.py bakes the yard, compiles this, boots the server and reads
 // the "[dnav-test]" lines.
 
@@ -18,6 +20,9 @@ new gWalker = INVALID_NPC_ID, gDriver = INVALID_NPC_ID, gCar = INVALID_VEHICLE_I
 new gChaser = INVALID_NPC_ID, gQuarry = INVALID_NPC_ID, gChaseCar = INVALID_VEHICLE_ID;
 new gTurner = INVALID_NPC_ID, gTurnQuarry = INVALID_NPC_ID, gTurnCar = INVALID_VEHICLE_ID;
 new Float:gTurnLast[3], bool:gTurnReversed, bool:gTurnCaught, bool:gTurnLeftYard, bool:gTurnStopped;
+new gTruck = INVALID_NPC_ID, gTruckCar = INVALID_VEHICLE_ID, gTruckStart, bool:gTruckChecked, bool:gTruckSlow, bool:gTrucked;
+new Float:gDriveLast[2], gDriveLastTick, Float:gMainMax, Float:gNorthMax, Float:gCornerMin = 999.0;
+new bool:gInfoMain, bool:gInfoStreet, bool:gClassesOk;
 new gPathRequest, gRouteRequest;
 new bool:gWalked, bool:gDrove, bool:gPathOk, bool:gRouteOk, bool:gThroughWall;
 new bool:gCaught, bool:gChaseThroughWall, bool:gChaseStopped;
@@ -46,6 +51,17 @@ Finish()
     if (!gTurnCaught) Fail("the turner did not reach the NPC behind it");
     if (gTurnLeftYard) Fail("the turner drove off the yard");
     if (!gTurnStopped) Fail("Nav_Stop did not end the turner's chase");
+    printf("[dnav-test] driver: up to %.1f m/s on the main road, %.1f round the corner, up to %.1f up the street",
+        gMainMax, gCornerMin, gNorthMax);
+    if (gMainMax > 10.8) Fail("the driver broke the main road's 36 km/h limit");
+    if (gMainMax < 8.0) Fail("the driver never got up to the main road's limit");
+    if (gNorthMax < 12.0) Fail("the driver did not speed up on the street (72 km/h)");
+    if (gCornerMin >= gNorthMax) Fail("the driver did not slow for the corner");
+    if (!gInfoMain) Fail("Nav_GetDriveInfo never said main road at 36 km/h");
+    if (!gInfoStreet) Fail("Nav_GetDriveInfo never said street up the one-way road");
+    if (!gClassesOk) Fail("the route's points do not carry main road, then street");
+    if (!gTruckSlow) Fail("the truck pulled away faster than its handling allows");
+    if (!gTrucked) Fail("the truck did not arrive");
     print(gFailures ? ("[dnav-test] FAILED") : ("[dnav-test] PASS"));
     SendRconCommand("exit");
 }
@@ -59,6 +75,17 @@ public OnGameModeInit()
     if (!Nav_GetTileCount()) Fail("no navmesh loaded");
     if (!Nav_GetTileCount(NAV_MESH_CAR)) Fail("no car navmesh loaded");
     if (!Nav_GetRoadNodeCount()) Fail("no road graph loaded");
+
+    // vehicles.dnv, from the yard's made-up handling.cfg: a Sultan, a Linerunner, a bike.
+    new Float:top, Float:accel, Float:brake, Float:grip, Float:radius;
+    if (Nav_GetVehicleModelCount() != 3) Fail("vehicles.dnv did not give 3 models");
+    Nav_GetVehicleHandling(560, top, accel, brake, grip, radius);
+    if (floatabs(top - 153.0) > 1.0 || floatabs(accel - 6.4) > 0.01) Fail("the Sultan's handling is not vehicles.dnv's");
+    Nav_GetVehicleHandling(403, top, accel, brake, grip, radius);
+    if (floatabs(accel - 1.6) > 0.01) Fail("the Linerunner's handling is not vehicles.dnv's");
+    if (!Nav_SetRoadSpeed(NAV_CLASS_MAIN, 36.0) || !Nav_SetRoadSpeed(NAV_CLASS_STREET, 72.0)) Fail("Nav_SetRoadSpeed refused");
+    if (floatabs(Nav_GetRoadSpeed(NAV_CLASS_MAIN) - 36.0) > 0.01) Fail("Nav_GetRoadSpeed is not what was set");
+    if (Nav_SetRoadSpeed(99, 50.0) || Nav_SetDriveStyle(0, 99)) Fail("a bad class or style was taken");
 
     // The wall stands between x = YX - 20 and YX + 20 at y = YY; 15 m north is open.
     if (Nav_IsLineClear(YX - 20.0, YY, YZ, YX + 20.0, YY, YZ, NAV_MESH_CAR)) Fail("a car's line through the wall is clear");
@@ -89,6 +116,11 @@ public OnGameModeInit()
     NPC_Spawn(gTurnQuarry);
     gTurnCar = CreateVehicle(560, YX - 8.0, YY + 22.0, YZ + 1.0, 270.0, 0, 0, -1);
     gTurnLast[0] = YX - 8.0, gTurnLast[1] = YY + 22.0;
+    // The truck: along the main road in pursuit (no limits), so only its handling holds it back.
+    gTruck = NPC_Create("dnav_truck");
+    NPC_Spawn(gTruck);
+    gTruckCar = CreateVehicle(403, YX - 60.0, YY - 42.5, YZ + 1.5, 270.0, 0, 0, -1);
+    gDriveLast[0] = YX - 100.0, gDriveLast[1] = YY - 42.5, gDriveLastTick = GetTickCount();
     SetTimer("StartMoving", 500, false);
     SetTimer("Watch", 200, true);
     SetTimer("TimedOut", TIMEOUT_MS, false);
@@ -101,7 +133,13 @@ public StartMoving()
     NPC_SetPos(gWalker, YX - 25.0, YY, YZ + 1.0);
     if (!Nav_WalkTo(gWalker, YX + 25.0, YY, YZ + 1.0, NPC_MOVE_TYPE_JOG)) Fail("Nav_WalkTo refused");
     NPC_PutInVehicle(gDriver, gCar, 0);
-    if (!Nav_DriveTo(gDriver, YX + 100.0, YY + 60.0, YZ + 1.0, 1.5)) Fail("Nav_DriveTo refused");
+    if (!Nav_DriveTo(gDriver, YX + 100.0, YY + 60.0, YZ + 1.0)) Fail("Nav_DriveTo refused");
+    gDriveLast[0] = YX - 100.0, gDriveLast[1] = YY - 42.5, gDriveLastTick = GetTickCount();
+    NPC_PutInVehicle(gTruck, gTruckCar, 0);
+    if (!Nav_SetDriveStyle(gTruck, NAV_STYLE_PURSUIT) || Nav_GetDriveStyle(gTruck) != NAV_STYLE_PURSUIT)
+        Fail("Nav_SetDriveStyle did not take");
+    if (!Nav_DriveTo(gTruck, YX + 60.0, YY - 42.5, YZ + 1.5, 0.0, 1.5)) Fail("Nav_DriveTo refused the truck");
+    gTruckStart = GetTickCount();
     if (Nav_DriveTo(gWalker, YX, YY, YZ)) Fail("Nav_DriveTo took an NPC that is not driving");
     // That refusal ended nothing: the walker's own walk goes on.
 
@@ -119,6 +157,15 @@ forward Watch();
 public Watch()
 {
     new Float:x, Float:y, Float:z;
+    WatchDriver();
+    if (!gTruckChecked && GetTickCount() - gTruckStart >= 3000) {
+        // 3 s at its 1.6 m/s^2 is 7.2 m; a Sultan would be 25 m on.
+        gTruckChecked = true;
+        GetVehiclePos(gTruckCar, x, y, z);
+        new Float:gone = floatabs(x - (YX - 60.0));
+        printf("[dnav-test] the truck went %.1f m in its first 3 s", gone);
+        gTruckSlow = gone > 2.0 && gone < 9.5;
+    }
     NPC_GetPos(gWalker, x, y, z);
     // The wall: 0.5 m thick along y at x = YX, 20 m long.
     if (floatabs(x - YX) < 0.25 && floatabs(y - YY) < 10.0) gThroughWall = true;
@@ -150,10 +197,35 @@ public Watch()
     }
 }
 
+// The driver's speed from where its car is (not what DiamondNav says), and where.
+WatchDriver()
+{
+    if (gDrove) return;
+    new Float:x, Float:y, Float:z, now = GetTickCount();
+    GetVehiclePos(gCar, x, y, z);
+    // Over 0.6 s or more: NPCs move in steps (each NPC update), so a shorter window
+    // catches three steps one time and five the next.
+    new Float:dt = float(now - gDriveLastTick) / 1000.0;
+    if (dt < 0.6) return;
+    new Float:speed = VectorSize(x - gDriveLast[0], y - gDriveLast[1], 0.0) / dt;
+    gDriveLast[0] = x, gDriveLast[1] = y, gDriveLastTick = now;
+
+    new Float:kmh, Float:want, cls, Float:limit, bool:back;
+    new bool:info = Nav_GetDriveInfo(gDriver, kmh, want, cls, limit, back);
+    if (y < YY - 35.0 && x > YX - 90.0 && x < YX + 80.0) {
+        if (speed > gMainMax) gMainMax = speed;
+        if (info && cls == NAV_CLASS_MAIN && floatabs(limit - 36.0) < 0.5) gInfoMain = true;
+    } else if (x > YX + 95.0 && y > YY - 20.0 && y < YY + 45.0) {
+        if (speed > gNorthMax) gNorthMax = speed;
+        if (info && cls == NAV_CLASS_STREET) gInfoStreet = true;
+    }
+    if (VectorSize(x - (YX + 100.0), y - (YY - 40.0), 0.0) < 8.0 && speed < gCornerMin) gCornerMin = speed;
+}
+
 forward TimedOut();
 public TimedOut()
 {
-    if (gDone < 4) Fail("timed out");
+    if (gDone < 5) Fail("timed out");
     Finish();
 }
 
@@ -168,6 +240,8 @@ public OnNavPathResult(requestid, status, points)
         printf("[dnav-test] route: status %d, %d points", status, points);
         gRouteOk = status == NAV_OK && points > 2 && Nav_GetPathPoint(requestid, 0, x, y, z)
             && y < YY - 40.0 && Nav_GetPathPointSpeed(requestid, points - 1) < 1.0;
+        gClassesOk = points > 2 && Nav_GetPathPointClass(requestid, 0) == NAV_CLASS_MAIN
+            && Nav_GetPathPointClass(requestid, points - 1) == NAV_CLASS_STREET && Nav_GetPathPointClass(requestid, points) == -1;
     }
     return 1;
 }
@@ -189,11 +263,16 @@ public OnNavMoveEnd(npcid, reason)
         printf("[dnav-test] chase ended: reason %d", reason);
         gChaseStopped = gCaught && reason == NAV_END_STOPPED;
         gDone++;
+    } else if (npcid == gTruck) {
+        GetVehiclePos(gTruckCar, x, y, z);
+        printf("[dnav-test] truck ended: reason %d, car at %.1f %.1f %.1f", reason, x, y, z);
+        gTrucked = reason == NAV_END_ARRIVED && VectorSize(x - (YX + 60.0), y - (YY - 42.5), 0.0) < 4.0;
+        gDone++;
     } else if (npcid == gTurner) {
         printf("[dnav-test] turner's chase ended: reason %d", reason);
         gTurnStopped = gTurnCaught && reason == NAV_END_STOPPED;
         gDone++;
     }
-    if (gDone == 4) Finish();
+    if (gDone == 5) Finish();
     return 1;
 }
