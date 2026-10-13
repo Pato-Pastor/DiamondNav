@@ -6,6 +6,9 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
   bridges, on a navmesh baked from the game world's collision (Recast/Detour).
 - **Driving:** NPC drivers follow the roads, keep to their lane, round corners and
   slow down for them, on a road graph built from GTA's own traffic paths.
+- **Chasing:** an NPC driver chases a player along the roads, and off them across a
+  car-sized navmesh when the player leaves the road; close in, it drives straight
+  at them when nothing is in the way.
 - **Your maps too:** custom SA-MP maps are baked in: objects your scripts create,
   buildings they remove, and custom models with their own collision. Build the
   world from a GTA San Andreas install or from ColAndreas's database.
@@ -20,6 +23,7 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 
 Nav_WalkTo(npcid, x, y, z);                // walk there along the navmesh
 Nav_DriveTo(npcid, x, y, z, 1.2);          // drive the NPC's car there along the roads
+Nav_Chase(npcid, playerid);                // chase a player, on or off the road
 
 public OnNavMoveEnd(npcid, reason)
 {
@@ -105,7 +109,14 @@ The build prints what it placed and what had no collision.
 navtools/navbake bake/world.tris navmesh/world.nav --seeds bake/world.seeds.txt --water bake/world.water.txt
 ```
 
-(`dnav.py world` prints this line with the files it wrote.) `--area "X0 Y0 X1 Y1"` on `dnav.py world` bakes part of it, which is
+For cars that leave the road (`Nav_Chase`, `NAV_DRIVE_OFFROAD`), bake the same world
+again for a car:
+
+```sh
+navtools/navbake bake/world.tris navmesh/world_car.nav --agent car --water bake/world.water.txt
+```
+
+(`dnav.py world` prints both lines with the files it wrote.) `--area "X0 Y0 X1 Y1"` on `dnav.py world` bakes part of it, which is
 quicker for trying things out. A `--routes` file makes navbake check that paths
 exist (each line `name<TAB>x y z<TAB>x y z`) and fail if one doesn't.
 
@@ -149,6 +160,20 @@ the NPC along the result point by point with open.mp's `NPC_Move`, and call
 script moved it, it left the driver's seat, died or was destroyed). A driver must
 be in seat 0; `carZ` is how high the car's centre sits over the road (1.0 for a
 car, more for a truck).
+
+**Chase.** `Nav_Chase(npcid, targetid, speed, carZ)` keeps a driver after a player
+(or another NPC) until `Nav_Stop`. It follows the roads while the target is on one,
+the car navmesh once it leaves them, and drives straight at the target when it is
+close and `Nav_IsLineClear` says nothing is in the way; it stops beside a target
+that stops, and re-plans as the target moves without pausing. It ends with
+`NAV_END_LOST` if the target leaves or changes world. What the NPCs do during the
+chase (shoot, ram, give up) is your script's. Without a car navmesh it stays on the
+roads and drives straight only when very close.
+
+**Lines.** `Nav_IsLineClear(x1, y1, z1, x2, y2, z2, kind)` says whether a ped
+(`NAV_MESH_PED`) or a car (`NAV_MESH_CAR`) can go straight between two points on the
+ground: no wall, drop or obstacle. It follows the ground, so it is not an eye-level
+line of sight; that needs the full collision mesh (ColAndreas).
 
 **Or take the points.** `Nav_RequestPath` (walking) and `Nav_RequestRoute`
 (driving) return a request id; `OnNavPathResult(requestid, status, points)` follows

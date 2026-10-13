@@ -9,6 +9,7 @@ Run `dnav.py <command> --help` for each. A typical bake of the whole map:
 
     python3 tools/dnav.py world --gta "C:/Games/GTA San Andreas" --map gamemodes/maps out/world
     navbake out/world.tris navmesh/world.nav --seeds out/world.seeds.txt --water out/world.water.txt
+    navbake out/world.tris navmesh/world_car.nav --agent car --water out/world.water.txt
     python3 tools/dnav.py roads --gta "C:/Games/GTA San Andreas" navmesh/roads.dnr
 
 and the server loads everything in its navmesh/ folder at start.
@@ -47,6 +48,10 @@ def cmd_world(a):
     if rep.water:
         nb.append(f"--water {a.out.with_suffix('.water.txt')}")
     print("next: " + " ".join(nb))
+    car = [f"navbake {a.out.with_suffix('.tris')} navmesh/world_car.nav --agent car"]
+    if rep.water:
+        car.append(f"--water {a.out.with_suffix('.water.txt')}")
+    print("and, for cars off the road (Nav_Chase): " + " ".join(car))
     return 0
 
 

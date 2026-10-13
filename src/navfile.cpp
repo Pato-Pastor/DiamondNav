@@ -1,6 +1,7 @@
 #include "navfile.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <memory>
 
@@ -25,23 +26,27 @@ struct Header {
     float origin[3];
     float agentHeight, agentRadius, agentClimb;
     uint32_t tileCount;
+    uint32_t kind;          // version 2 on; version 1 files are all walking meshes
 };
+constexpr size_t HEADER_V1 = offsetof(Header, kind);
 
-Header expectedHeader()
+Header expectedHeader(MeshKind kind)
 {
+    const Profile& pr = profile(kind);
     Header h {};
     h.magic = FILE_MAGIC;
     h.version = FILE_VERSION;
     h.polyRefBits = sizeof(dtPolyRef) * 8;
-    h.cell = Grid::CELL;
-    h.cellHeight = Grid::CELL_HEIGHT;
-    h.tileSize = Grid::TILE_SIZE;
+    h.cell = pr.cell;
+    h.cellHeight = pr.cellHeight;
+    h.tileSize = pr.tileSize();
     h.origin[0] = Grid::ORIGIN_X;
     h.origin[1] = Grid::ORIGIN_Y;
     h.origin[2] = Grid::ORIGIN_Z;
-    h.agentHeight = Agent::HEIGHT;
-    h.agentRadius = Agent::RADIUS;
-    h.agentClimb = Agent::CLIMB;
+    h.agentHeight = pr.height;
+    h.agentRadius = pr.radius;
+    h.agentClimb = pr.climb;
+    h.kind = static_cast<uint32_t>(kind);
     return h;
 }
 
@@ -54,7 +59,7 @@ bool writeNavFile(const std::string& path, const NavFile& file, std::string& err
         error = "cannot write " + path;
         return false;
     }
-    Header h = expectedHeader();
+    Header h = expectedHeader(file.kind);
     h.tileCount = static_cast<uint32_t>(file.tiles.size());
     bool ok = std::fwrite(&h, sizeof h, 1, f.get()) == 1;
     for (const Tile& t : file.tiles) {
@@ -75,18 +80,28 @@ bool readNavFile(const std::string& path, NavFile& file, std::string& error)
         return false;
     }
     Header h {};
-    if (std::fread(&h, sizeof h, 1, f.get()) != 1 || h.magic != FILE_MAGIC) {
+    if (std::fread(&h, HEADER_V1, 1, f.get()) != 1 || h.magic != FILE_MAGIC) {
         error = path + " is not a navmesh file";
         return false;
     }
-    Header want = expectedHeader();
-    if (h.version != want.version || h.polyRefBits != want.polyRefBits || h.cell != want.cell
+    if (h.version >= 2 && std::fread(&h.kind, sizeof h.kind, 1, f.get()) != 1) {
+        error = path + " is cut short";
+        return false;
+    }
+    if (h.version < 2) h.kind = static_cast<uint32_t>(MeshKind::Ped);
+    if (h.kind >= static_cast<uint32_t>(MESH_KINDS)) {
+        error = path + " is a kind of navmesh this DiamondNav does not know: update it";
+        return false;
+    }
+    Header want = expectedHeader(static_cast<MeshKind>(h.kind));
+    if (h.version > FILE_VERSION || h.polyRefBits != want.polyRefBits || h.cell != want.cell
         || h.cellHeight != want.cellHeight || h.tileSize != want.tileSize || h.origin[0] != want.origin[0]
         || h.origin[1] != want.origin[1] || h.origin[2] != want.origin[2] || h.agentHeight != want.agentHeight
         || h.agentRadius != want.agentRadius || h.agentClimb != want.agentClimb) {
         error = path + " was baked with other settings: bake it again with this navbake";
         return false;
     }
+    file.kind = static_cast<MeshKind>(h.kind);
     file.polyRefBits = h.polyRefBits;
     file.tiles.clear();
     file.tiles.reserve(h.tileCount);
@@ -109,16 +124,16 @@ bool readNavFile(const std::string& path, NavFile& file, std::string& error)
     return true;
 }
 
-dtNavMeshParams worldParams(int maxTiles)
+dtNavMeshParams worldParams(MeshKind kind, int maxTiles)
 {
     dtNavMeshParams p {};
     p.orig[0] = Grid::ORIGIN_X;
     p.orig[1] = Grid::ORIGIN_Y;
     p.orig[2] = Grid::ORIGIN_Z;
-    p.tileWidth = Grid::TILE_SIZE;
-    p.tileHeight = Grid::TILE_SIZE;
+    p.tileWidth = profile(kind).tileSize();
+    p.tileHeight = profile(kind).tileSize();
     p.maxTiles = maxTiles < 1 ? 1 : maxTiles;
-    // Polygons per tile: the most a 25.6 m tile of busy city could need.
+    // Polygons per tile: the most a tile of busy city could need.
     p.maxPolys = 1 << 14;
     return p;
 }

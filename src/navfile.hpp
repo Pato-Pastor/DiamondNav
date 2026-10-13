@@ -1,6 +1,6 @@
 // The .nav file and the settings the baker and the component share.
 //
-// One world-wide tile grid: every map bakes the tiles its geometry touches, on the
+// One world-wide tile grid per kind of mesh: every map bakes the tiles its geometry touches, on the
 // same grid, so the component can put the tiles of every navmesh/*.nav file into
 // one dtNavMesh. Two files must not bake the same tile (the loader refuses the
 // second). Coordinates: GTA is x, y, z with z up; Recast is y up. The swap below is
@@ -17,23 +17,44 @@
 namespace dnav {
 
 constexpr uint32_t FILE_MAGIC = 0x564E4E44;     // "DNNV"
-constexpr uint32_t FILE_VERSION = 1;
+constexpr uint32_t FILE_VERSION = 2;            // 2: the header says which kind of mesh
 
-// A ped in San Andreas: 1.8 m tall, about 0.35 m round, steps up 0.45 m.
-struct Agent {
-    static constexpr float HEIGHT = 1.8f;
-    static constexpr float RADIUS = 0.35f;
-    static constexpr float CLIMB = 0.45f;
-    static constexpr float MAX_SLOPE = 50.0f;   // degrees: escalator ramps are ~30
+// Who the navmesh is for. A walking mesh and a car mesh live side by side, each in
+// its own dtNavMesh.
+enum class MeshKind : uint32_t {
+    Ped = 0,
+    Car = 1,
+};
+constexpr int MESH_KINDS = 2;
+
+// The bake settings of each kind. The grid's origin is shared: the map's south-west
+// corner (in Recast's axes), so tile (0, 0) starts at GTA x -3000, y +3000.
+struct Profile {
+    float cell, cellHeight;     // metres
+    int tileCells;
+    float height, radius, climb, maxSlope;
+    float tileSize() const { return cell * tileCells; }
 };
 
-// The grid. 0.2 m cells, 25.6 m tiles; the origin is the map's south-west corner
-// (in Recast's axes), so tile (0, 0) starts at GTA x -3000, y +3000.
+// A ped in San Andreas: 1.8 m tall, about 0.35 m round, steps up 0.45 m; escalator
+// ramps are about 30 degrees. 0.2 m cells, 25.6 m tiles.
+constexpr Profile PED_PROFILE { 0.2f, 0.1f, 128, 1.8f, 0.35f, 0.45f, 50.0f };
+// A car: a Sultan is 4.5 by 1.8 m, so a 1.4 m radius keeps it off walls when it
+// turns; kerbs and low walls up to 0.6 m are crossed, slopes up to 35 degrees. 0.5 m
+// cells, 64 m tiles: a car needs less detail than a ped.
+constexpr Profile CAR_PROFILE { 0.5f, 0.2f, 128, 2.0f, 1.4f, 0.6f, 35.0f };
+
+inline const Profile& profile(MeshKind kind)
+{
+    return kind == MeshKind::Car ? CAR_PROFILE : PED_PROFILE;
+}
+
+inline const char* kindName(MeshKind kind)
+{
+    return kind == MeshKind::Car ? "car" : "walking";
+}
+
 struct Grid {
-    static constexpr float CELL = 0.2f;
-    static constexpr float CELL_HEIGHT = 0.1f;
-    static constexpr int TILE_CELLS = 128;
-    static constexpr float TILE_SIZE = CELL * TILE_CELLS;
     static constexpr float ORIGIN_X = -3000.0f;
     static constexpr float ORIGIN_Y = -200.0f;  // Recast y = GTA z
     static constexpr float ORIGIN_Z = -3000.0f; // Recast z = -GTA y
@@ -59,6 +80,7 @@ struct Tile {
 };
 
 struct NavFile {
+    MeshKind kind = MeshKind::Ped;
     uint32_t polyRefBits = 0;                   // sizeof(dtPolyRef) * 8 when baked
     std::vector<Tile> tiles;
 };
@@ -66,7 +88,7 @@ struct NavFile {
 bool writeNavFile(const std::string& path, const NavFile& file, std::string& error);
 bool readNavFile(const std::string& path, NavFile& file, std::string& error);
 
-// dtNavMesh params for the world grid, room for maxTiles tiles.
-dtNavMeshParams worldParams(int maxTiles);
+// dtNavMesh params for a kind's world grid, room for maxTiles tiles.
+dtNavMeshParams worldParams(MeshKind kind, int maxTiles);
 
 } // namespace dnav

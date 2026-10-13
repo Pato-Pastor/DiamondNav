@@ -63,6 +63,13 @@ def main():
         if res.returncode:
             print(res.stdout + res.stderr)
             return 1
+        # The same yard for a car: where the chase may leave the road.
+        res = subprocess.run([str(a.build / f"navbake{exe}"), str(yard / "world.tris"), str(srv / "navmesh" / "world_car.nav"),
+                              "--agent", "car", "--water", str(yard / "world.water.txt")],
+                             capture_output=True, text=True)
+        if res.returncode:
+            print(res.stdout + res.stderr)
+            return 1
         roads.build(srv / "navmesh" / "roads.dnr", gta.node_files(yard / "gta", []))
 
         pawncc = srv / "qawno" / f"pawncc{exe}"

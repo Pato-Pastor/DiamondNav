@@ -1,7 +1,10 @@
 // navbake: collision -> navmesh tiles (navmesh/<map>.nav, navmesh/world.nav).
 //
-//   navbake <geometry> <out.nav> [--routes routes.txt [--paths paths.txt]]
+//   navbake <geometry> <out.nav> [--agent ped|car] [--routes routes.txt [--paths paths.txt]]
 //           [--seeds seeds.txt] [--water water.txt] [--dump polys.obj] [--threads N]
+//
+// --agent picks who the mesh is for: ped (the default) for walking, car for where a
+// car fits when it leaves the road (navfile.hpp has both profiles).
 //
 // geometry is world triangles in GTA axes: an OBJ, or a .tris file
 // (tools/dnav_world.py: "DNTR", a count, then float32 x y z for each corner).
@@ -107,9 +110,8 @@ bool loadTris(const std::string& path, Geometry& g)
 
 // Which tiles each face touches (its bounds grown by the tile border), so a tile's
 // bake only rasterises its own faces: RecastDemo's chunky mesh, as a grid.
-void bucketFaces(Geometry& g, float border)
+void bucketFaces(Geometry& g, float border, float ts)
 {
-    const float ts = Grid::TILE_SIZE;
     auto tileOf = [&](float v, float origin) { return static_cast<int>(std::floor((v - origin) / ts)); };
     g.tx0 = tileOf(g.bmin[0], Grid::ORIGIN_X);
     g.tx1 = tileOf(g.bmax[0], Grid::ORIGIN_X);
@@ -163,21 +165,24 @@ struct Context : rcContext {
     }
 };
 
+MeshKind g_kind = MeshKind::Ped;
+
 rcConfig baseConfig()
 {
+    const Profile& pr = profile(g_kind);
     rcConfig c {};
-    c.cs = Grid::CELL;
-    c.ch = Grid::CELL_HEIGHT;
-    c.walkableSlopeAngle = Agent::MAX_SLOPE;
-    c.walkableHeight = static_cast<int>(std::ceil(Agent::HEIGHT / c.ch));
-    c.walkableClimb = static_cast<int>(std::floor(Agent::CLIMB / c.ch));
-    c.walkableRadius = static_cast<int>(std::ceil(Agent::RADIUS / c.cs));
+    c.cs = pr.cell;
+    c.ch = pr.cellHeight;
+    c.walkableSlopeAngle = pr.maxSlope;
+    c.walkableHeight = static_cast<int>(std::ceil(pr.height / c.ch));
+    c.walkableClimb = static_cast<int>(std::floor(pr.climb / c.ch));
+    c.walkableRadius = static_cast<int>(std::ceil(pr.radius / c.cs));
     c.maxEdgeLen = static_cast<int>(12.0f / c.cs);
     c.maxSimplificationError = 1.3f;
     c.minRegionArea = 8 * 8;
     c.mergeRegionArea = 20 * 20;
     c.maxVertsPerPoly = 6;
-    c.tileSize = Grid::TILE_CELLS;
+    c.tileSize = pr.tileCells;
     c.borderSize = c.walkableRadius + 3;
     c.width = c.tileSize + c.borderSize * 2;
     c.height = c.tileSize + c.borderSize * 2;
@@ -190,7 +195,7 @@ rcConfig baseConfig()
 std::vector<unsigned char> bakeTile(Context& ctx, const Geometry& g, const std::vector<Water>& water, int tx, int ty)
 {
     rcConfig cfg = baseConfig();
-    const float ts = Grid::TILE_SIZE;
+    const float ts = profile(g_kind).tileSize();
     cfg.bmin[0] = Grid::ORIGIN_X + tx * ts;
     cfg.bmin[1] = g.bmin[1];
     cfg.bmin[2] = Grid::ORIGIN_Z + ty * ts;
@@ -268,9 +273,9 @@ std::vector<unsigned char> bakeTile(Context& ctx, const Geometry& g, const std::
         p.detailVertsCount = dmesh->nverts;
         p.detailTris = dmesh->tris;
         p.detailTriCount = dmesh->ntris;
-        p.walkableHeight = Agent::HEIGHT;
-        p.walkableRadius = Agent::RADIUS;
-        p.walkableClimb = Agent::CLIMB;
+        p.walkableHeight = profile(g_kind).height;
+        p.walkableRadius = profile(g_kind).radius;
+        p.walkableClimb = profile(g_kind).climb;
         p.tileX = tx;
         p.tileY = ty;
         p.tileLayer = 0;
@@ -329,7 +334,8 @@ int checkRoutes(const std::string& navPath, const std::vector<Route>& routes, co
     if (!pathsOut.empty()) paths.open(pathsOut);
     int bad = 0;
     for (const Route& r : routes) {
-        PathResult res = finder.findNow(Point { r.from[0], r.from[1], r.from[2] }, Point { r.to[0], r.to[1], r.to[2] });
+        PathResult res = finder.findNow(Point { r.from[0], r.from[1], r.from[2] }, Point { r.to[0], r.to[1], r.to[2] },
+            g_kind);
         float length = 0.0f;
         for (size_t i = 1; i < res.points.size(); i++) {
             const Point &a = res.points[i - 1], &b = res.points[i];
@@ -438,7 +444,7 @@ void dumpPolys(const dtNavMesh* mesh, const std::string& path)
 int main(int argc, char** argv)
 {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: navbake <geometry.obj|.tris> <out.nav> [--routes routes.txt [--paths paths.txt]]\n"
+        std::fprintf(stderr, "usage: navbake <geometry.obj|.tris> <out.nav> [--agent ped|car] [--routes routes.txt [--paths paths.txt]]\n"
                              "               [--seeds seeds.txt] [--water water.txt] [--dump polys.obj] [--threads N]\n");
         return 2;
     }
@@ -451,6 +457,13 @@ int main(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--seeds")) seedsPath = argv[i + 1];
         else if (!std::strcmp(argv[i], "--water")) waterPath = argv[i + 1];
         else if (!std::strcmp(argv[i], "--threads")) threads = std::max(1, std::atoi(argv[i + 1]));
+        else if (!std::strcmp(argv[i], "--agent")) {
+            if (!std::strcmp(argv[i + 1], "car")) g_kind = MeshKind::Car;
+            else if (std::strcmp(argv[i + 1], "ped")) {
+                std::fprintf(stderr, "[navbake] --agent is ped or car\n");
+                return 2;
+            }
+        }
     }
 
     Geometry g;
@@ -460,7 +473,7 @@ int main(int argc, char** argv)
         return 1;
     }
     const rcConfig cfg = baseConfig();
-    bucketFaces(g, (cfg.borderSize + 1) * cfg.cs);
+    bucketFaces(g, (cfg.borderSize + 1) * cfg.cs, profile(g_kind).tileSize());
     const std::vector<Water> water = waterPath.empty() ? std::vector<Water> {} : loadWater(waterPath);
     const auto seeds = seedsPath.empty() ? std::vector<std::array<float, 3>> {} : loadPoints(seedsPath);
 
@@ -494,8 +507,10 @@ int main(int argc, char** argv)
         t.data = std::move(baked[i]);
         file.tiles.push_back(std::move(t));
     }
-    std::printf("[navbake] %s: %zu triangles, %d of %zu tiles walkable (%d threads)\n", geomPath.c_str(),
-        g.tris.size() / 6, static_cast<int>(file.tiles.size()), todo.size(), threads);
+    file.kind = g_kind;
+    std::printf("[navbake] %s: %zu triangles, %d of %zu tiles walkable for a %s (%d threads)\n", geomPath.c_str(),
+        g.tris.size() / 6, static_cast<int>(file.tiles.size()), todo.size(), g_kind == MeshKind::Car ? "car" : "ped",
+        threads);
     if (file.tiles.empty()) {
         std::fprintf(stderr, "[navbake] nothing walkable\n");
         return 1;
@@ -503,7 +518,7 @@ int main(int argc, char** argv)
 
     // Load what was baked the way the component will, to check it.
     dtNavMesh* mesh = dtAllocNavMesh();
-    dtNavMeshParams params = worldParams(static_cast<int>(file.tiles.size()));
+    dtNavMeshParams params = worldParams(g_kind, static_cast<int>(file.tiles.size()));
     if (dtStatusFailed(mesh->init(&params))) {
         std::fprintf(stderr, "[navbake] dtNavMesh init failed\n");
         return 1;
