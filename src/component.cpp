@@ -351,14 +351,16 @@ public:
 
     bool isMoving(int npcid) const { return movers_.count(npcid) != 0; }
 
-    // Nav_SetDriveStyle: from now on, and for the drive it is on.
-    void setStyle(int npcid, dnav::DriveStyle style)
+    // Nav_SetDriveStyle: from now on, and for the drive it is on. -1 goes back to the
+    // default (normal, or pursuit in a chase).
+    void setStyle(int npcid, int style)
     {
-        styles[npcid] = style;
+        if (style < 0) styles.erase(npcid);
+        else styles[npcid] = static_cast<dnav::DriveStyle>(style);
         auto it = movers_.find(npcid);
         if (it == movers_.end() || !driving(it->second.kind)) return;
         Mover& m = it->second;
-        m.style = style;
+        m.style = styleOf(npcid, m.chase);
         INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
         if (npc && npc->getVehicle() && !m.points.empty()) planSpeeds(m, *npc->getVehicle());
     }
@@ -1099,14 +1101,14 @@ bool validClass(int c)
 
 SCRIPT_API(Nav_SetDriveStyle, bool(int npcid, int style))
 {
-    if (!DiamondNav::instance || style < 0 || style >= static_cast<int>(dnav::DriveStyle::Count)) return false;
-    DiamondNav::instance->setStyle(npcid, static_cast<dnav::DriveStyle>(style));
+    if (!DiamondNav::instance || style < -1 || style >= static_cast<int>(dnav::DriveStyle::Count)) return false;
+    DiamondNav::instance->setStyle(npcid, style);
     return true;
 }
 
 SCRIPT_API(Nav_GetDriveStyle, int(int npcid))
 {
-    if (!DiamondNav::instance) return static_cast<int>(dnav::DriveStyle::Normal);
+    if (!DiamondNav::instance) return -1;
     auto it = DiamondNav::instance->styles.find(npcid);
     return it == DiamondNav::instance->styles.end() ? -1 : static_cast<int>(it->second);
 }

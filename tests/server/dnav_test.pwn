@@ -139,6 +139,9 @@ public StartMoving()
     if (!Nav_SetDriveStyle(gTruck, NAV_STYLE_PURSUIT) || Nav_GetDriveStyle(gTruck) != NAV_STYLE_PURSUIT)
         Fail("Nav_SetDriveStyle did not take");
     if (!Nav_DriveTo(gTruck, YX + 60.0, YY - 42.5, YZ + 1.5, 0.0, 1.5)) Fail("Nav_DriveTo refused the truck");
+    Nav_SetDriveStyle(gWalker, NAV_STYLE_FAST);
+    if (!Nav_SetDriveStyle(gWalker, NAV_STYLE_DEFAULT) || Nav_GetDriveStyle(gWalker) != NAV_STYLE_DEFAULT)
+        Fail("NAV_STYLE_DEFAULT did not clear a style");
     gTruckStart = GetTickCount();
     if (Nav_DriveTo(gWalker, YX, YY, YZ)) Fail("Nav_DriveTo took an NPC that is not driving");
     // That refusal ended nothing: the walker's own walk goes on.

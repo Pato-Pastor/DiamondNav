@@ -69,6 +69,7 @@
 #define NAV_STYLE_FAST          (2)     // a quarter over the limits, brisk corners, late braking
 #define NAV_STYLE_PURSUIT       (3)     // no limits: as fast as the car and the corners allow
                                         // (Nav_Chase's default)
+#define NAV_STYLE_DEFAULT       (-1)    // Nav_SetDriveStyle: back to the default
 
 // ── Information ──────────────────────────────────────────────────────────────
 
@@ -116,8 +117,9 @@ native bool:Nav_IsMoving(npcid);
 // ── How cars drive ───────────────────────────────────────────────────────────
 
 // An NPC's driving style (NAV_STYLE_*), kept until the NPC is destroyed; it applies
-// at once to a drive or chase under way. Nav_GetDriveStyle is -1 for an NPC that has
-// none (Nav_DriveTo then drives normally, Nav_Chase in pursuit).
+// at once to a drive or chase under way. NAV_STYLE_DEFAULT clears it, and
+// Nav_GetDriveStyle is NAV_STYLE_DEFAULT for an NPC that has none (Nav_DriveTo then
+// drives normally, Nav_Chase in pursuit).
 native bool:Nav_SetDriveStyle(npcid, style);
 native Nav_GetDriveStyle(npcid);
 
