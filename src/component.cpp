@@ -127,6 +127,7 @@ struct Mover {
     size_t seg = 0;
     float v = 0.0f;                     // m/s
     float heading = 0.0f;               // degrees, GTA's
+    float yawRate = 0.0f;               // degrees a second it is turning at
     bool rolling = false;               // speed and heading are the car's own
     bool ground = false;                // read the height off the car mesh as it goes
     TimePoint lastDrive {};
@@ -493,12 +494,14 @@ public:
         if (!m.rolling) {
             m.heading = car->getRotation().ToEuler().z;
             m.v = 0.0f;
+            m.yawRate = 0.0f;
             m.rolling = true;
             dt = 0.05f;
         }
         dt = std::clamp(dt, 0.0f, 0.25f);
 
         float target = 0.0f, error = 0.0f, remaining = 0.0f;
+        bool offRoad = false;
         Vector3 ahead2;
         const size_t n = m.points.size();
         float aheadZ = pos.z;
@@ -548,7 +551,8 @@ public:
             // down to each slower point ahead (a corner, a junction, a lower limit) by the
             // time it gets there, with the share of its brakes its style plans with.
             const dnav::StyleUse& use = dnav::styleUse(m.style);
-            const float brakePlan = m.car.brake * use.brake;
+            offRoad = m.classes[best + 1] == dnav::RoadClass::OffRoad;
+            const float brakePlan = (offRoad ? m.car.brakeOff : m.car.brake) * use.brake;
             // The road it is on (a point carries the class of the stretch leading to it).
             target = drivingModel.roadSpeed(m.classes[best + 1], m.car, m.style, m.speed > 0.0f ? m.speed * SPEED_UNIT : 0.0f);
             if (glm::distance(Vector2(at), Vector2(m.points[best])) < PASSED_CORNER) target = std::min(target, m.limits[best]);
@@ -560,7 +564,8 @@ public:
             const float abs = std::fabs(error);
             if (abs > 3.0f) {
                 const float arc = look / (2.0f * std::sin(glm::radians(std::min(abs, 90.0f))));
-                target = std::min(target, std::sqrt(m.car.grip * use.grip * std::max(arc, m.car.radius)));
+                target = std::min(target, std::sqrt((offRoad ? m.car.gripOff : m.car.grip) * use.grip
+                    * std::max(arc, m.car.radius)));
             }
             if (abs > 30.0f) target = std::max(target, TURN_MIN_SPEED);
             // Brake to stop at the end.
@@ -619,19 +624,20 @@ public:
                     m.circling = 0.0f;
                 }
             } else if (m.reversing) {
-                target = std::min(std::min(REVERSE_SPEED, m.car.top / 3.0f), std::max(target, TURN_MIN_SPEED));
+                target = std::min(std::min(REVERSE_SPEED, m.car.reverse), std::max(target, TURN_MIN_SPEED));
             }
         }
 
-        // Pulling away fades towards the car's top speed, as in GTA; braking is as hard
-        // as the car can when it must (the plan itself only counts on its style's share).
+        // Pulling away follows the car's own acceleration at this speed (its gears, its
+        // engine, the air, what its tyres put down on this ground), the style's share of
+        // it; braking is as hard as the car can when it must (the plan itself only
+        // counts on its style's share).
         m.wantSpeed = target;
         if (target > m.v) {
-            const float r = m.v / m.car.top;
-            const float pull = m.car.accel * dnav::styleUse(m.style).accel * std::max(0.2f, 1.0f - r * r);
+            const float pull = m.car.accelAt(m.v, offRoad) * dnav::styleUse(m.style).accel;
             m.v = std::min(target, m.v + pull * dt);
         } else {
-            m.v = std::max(target, m.v - m.car.brake * dt);
+            m.v = std::max(target, m.v - (offRoad ? m.car.brakeOff : m.car.brake) * dt);
         }
         m.v = std::max(0.0f, m.v);
         if (m.v < 0.3f && target < 0.3f) {
@@ -639,11 +645,19 @@ public:
             if (npc->isMoving()) npc->stopMove();
             return;
         }
-        // It turns no tighter than its turning circle, nor, at speed, than its grip holds.
-        // Backing up, the nose still swings toward the aim: the wheels turn the other way.
-        const float turning = std::max(m.car.radius, m.v * m.v / (m.car.grip * 0.95f));
+        // It turns no tighter than its turning circle, nor, at speed, than its grip holds,
+        // and it gets into a turn (and out of it) only as fast as its front tyres can
+        // swing its weight round (its turn mass): the turn rate builds up and dies down,
+        // easing off in time to stop on the heading it wants. Backing up, the nose still
+        // swings toward the aim: the wheels turn the other way.
+        const float turning = std::max(m.car.radius, m.v * m.v / ((offRoad ? m.car.gripOff : m.car.grip) * 0.95f));
         const float maxYaw = glm::degrees(std::max(m.v, TURN_MIN_SPEED * 0.5f) / turning);
-        m.heading = wrap180(m.heading + std::clamp(error, -maxYaw * dt, maxYaw * dt));
+        const float yawAccel = glm::degrees(m.car.yaw);
+        float wantRate = std::copysign(std::min(maxYaw, std::sqrt(2.0f * yawAccel * std::fabs(error))), error);
+        if (dt > 0.0f) wantRate = std::clamp(wantRate, -std::fabs(error) / dt, std::fabs(error) / dt);
+        m.yawRate += std::clamp(wantRate - m.yawRate, -yawAccel * dt, yawAccel * dt);
+        m.yawRate = std::clamp(m.yawRate, -maxYaw, maxYaw);
+        m.heading = wrap180(m.heading + m.yawRate * dt);
         if (m.reversing) m.backed += m.v * dt;
 
         // NPC_Move's target: straight ahead on the new heading, at the path's height (or
@@ -1131,7 +1145,7 @@ SCRIPT_API(Nav_SetVehicleHandling, bool(int model, float topKmh, float accel, fl
 {
     if (!DiamondNav::instance || !(topKmh > 0.0f && accel > 0.0f && brake > 0.0f && grip > 0.0f && radius > 0.0f))
         return false;
-    DiamondNav::instance->drivingModel.setHandling(model, dnav::Handling { topKmh / KMH, accel, brake, grip, radius });
+    DiamondNav::instance->drivingModel.setHandling(model, dnav::Handling::simple(topKmh / KMH, accel, brake, grip, radius));
     DiamondNav::instance->replanAll();
     return true;
 }
@@ -1140,11 +1154,48 @@ SCRIPT_API(Nav_GetVehicleHandling, bool(int model, float& topKmh, float& accel, 
 {
     const dnav::Handling h = DiamondNav::instance ? DiamondNav::instance->drivingModel.handling(model) : dnav::Handling {};
     topKmh = h.top * KMH;
-    accel = h.accel;
+    accel = h.accel[0];
     brake = h.brake;
     grip = h.grip;
     radius = h.radius;
     return DiamondNav::instance != nullptr;
+}
+
+// One number about how a model drives (NAV_VINFO_* in DiamondNav.inc).
+SCRIPT_API(Nav_GetVehicleInfo, float(int model, int info))
+{
+    const dnav::Handling h = DiamondNav::instance ? DiamondNav::instance->drivingModel.handling(model) : dnav::Handling {};
+    switch (info) {
+    case 0: return h.top * KMH;
+    case 1: return h.accel[0];
+    case 2: return h.brake;
+    case 3: return h.brakeOff;
+    case 4: return h.coast;
+    case 5: return h.drag;
+    case 6: return h.grip;
+    case 7: return h.gripOff;
+    case 8: return h.radius;
+    case 9: return h.yaw;
+    case 10: return h.reverse * KMH;
+    case 11: return h.length;
+    case 12: return h.width;
+    case 13: return h.height;
+    case 14: return h.wheelbase;
+    case 15: return h.accelTime(0.0f, 100.0f / KMH);
+    default: return 0.0f;
+    }
+}
+
+SCRIPT_API(Nav_GetVehicleAccel, float(int model, float speedKmh, bool offRoad))
+{
+    const dnav::Handling h = DiamondNav::instance ? DiamondNav::instance->drivingModel.handling(model) : dnav::Handling {};
+    return h.accelAt(speedKmh / KMH, offRoad);
+}
+
+SCRIPT_API(Nav_GetVehicleAccelTime, float(int model, float fromKmh, float toKmh))
+{
+    const dnav::Handling h = DiamondNav::instance ? DiamondNav::instance->drivingModel.handling(model) : dnav::Handling {};
+    return h.accelTime(fromKmh / KMH, toKmh / KMH);
 }
 
 SCRIPT_API(Nav_GetVehicleModelCount, int())

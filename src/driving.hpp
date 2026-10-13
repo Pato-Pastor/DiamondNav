@@ -17,13 +17,40 @@
 
 namespace dnav {
 
-// How a model drives, in metres and seconds.
+constexpr int ACCEL_POINTS = 16;        // vehicles.dnv's acceleration samples, 0 to top speed
+
+// How a model drives, in metres and seconds (tools/dnavlib/vehicles.py works these
+// out from the game's handling.cfg, surface.dat and each model's DFF).
 struct Handling {
-    float top = 45.0f;          // top speed, m/s
-    float accel = 3.5f;         // pulling away, m/s^2 (it fades towards the top speed)
-    float brake = 7.0f;         // the hardest it brakes, m/s^2
-    float grip = 7.5f;          // the most sideways acceleration it holds in a corner, m/s^2
-    float radius = 6.0f;        // its tightest turning circle, m
+    float top = 45.0f;          // top speed on the flat, m/s
+    float brake = 7.0f;         // full brakes on a road, m/s^2
+    float brakeOff = 5.0f;      // ... on dirt
+    float coast = 2.0f;         // rolling with no throttle, m/s^2 (before the air)
+    float drag = 0.0f;          // the air's deceleration per (m/s)^2
+    float grip = 7.5f;          // the most sideways acceleration it holds in a corner on a road, m/s^2
+    float gripOff = 5.3f;       // ... on dirt
+    float radius = 6.0f;        // the tightest circle its centre turns, m
+    float yaw = 4.0f;           // how fast it can start (or stop) turning, rad/s^2
+    float reverse = 12.0f;      // top speed backing up, m/s
+    float length = 4.5f, width = 1.9f, height = 1.5f, wheelbase = 2.6f;    // m
+    // Full-throttle acceleration (m/s^2) at top * i / (ACCEL_POINTS - 1): the gears,
+    // the engine, the air and how much of it the tyres put down, on a road and on dirt.
+    std::array<float, ACCEL_POINTS> accel {}, accelOff {};
+
+    Handling() { *this = simple(45.0f, 3.5f, 7.0f, 7.5f, 6.0f); }
+
+    // A car described by five numbers (vehicles.dnv version 1, Nav_SetVehicleHandling):
+    // its acceleration fades towards its top speed, dirt takes a third of its grip.
+    static Handling simple(float top, float accel, float brake, float grip, float radius);
+
+    // Full-throttle acceleration at speed v (m/s).
+    float accelAt(float v, bool offRoad) const;
+    // Seconds from one speed to another at full throttle on a road (0 when it never gets there).
+    float accelTime(float from, float to) const;
+
+private:
+    struct Raw {};
+    explicit Handling(Raw) {}
 };
 
 enum class DriveStyle : int {
@@ -70,6 +97,7 @@ public:
     // The fastest a car may go at each point of `points` (m/s): the road's limit for
     // the style, its corners for the car's grip, junctions, the car's top speed and
     // `cap` (0: none). Braking ahead of each point is the driver's job.
+    // Off the road it corners on its grip on dirt.
     std::vector<float> plan(const std::vector<Point>& points, const std::vector<RoadClass>& classes,
         const std::vector<uint8_t>& junctions, const Handling& car, DriveStyle style, float cap) const;
 

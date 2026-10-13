@@ -3,7 +3,7 @@
 
     dnav.py world   build the world's collision for navbake (stock map + your maps)
     dnav.py roads   build roads.dnr, the road graph NPC drivers follow
-    dnav.py vehicles build vehicles.dnv, how each vehicle model drives (from handling.cfg)
+    dnav.py vehicles build vehicles.dnv, how each vehicle model drives (GTA's physics on handling.cfg)
     dnav.py preview draw a baked navmesh, its checked routes and the roads as a PNG
 
 Run `dnav.py <command> --help` for each. A typical bake of the whole map:
@@ -119,7 +119,7 @@ def main(argv=None):
     v = sub.add_parser("vehicles", help="build vehicles.dnv, how each model drives", description=vehicles.__doc__,
                        formatter_class=argparse.RawDescriptionHelpFormatter)
     v.add_argument("out", type=Path, help="output file, normally navmesh/vehicles.dnv")
-    v.add_argument("--gta", type=Path, required=True, help="a GTA San Andreas folder (data/handling.cfg, data/vehicles.ide)")
+    v.add_argument("--gta", type=Path, required=True, help="a GTA San Andreas folder (data/handling.cfg, vehicles.ide, surface.dat; models/gta3.img)")
     v.set_defaults(fn=cmd_vehicles)
 
     p = sub.add_parser("preview", help="draw a navmesh, its routes and the roads as a PNG")

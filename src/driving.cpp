@@ -64,6 +64,43 @@ Driving::Driving()
     setLimit(RoadClass::OffRoad, 60.0f * KMH);
 }
 
+Handling Handling::simple(float top, float accel, float brake, float grip, float radius)
+{
+    Handling h { Raw {} };
+    h.top = top;
+    h.brake = brake;
+    h.brakeOff = brake * 0.7f;
+    h.grip = grip;
+    h.gripOff = grip * 0.7f;
+    h.radius = radius;
+    for (int i = 0; i < ACCEL_POINTS; i++) {
+        const float r = static_cast<float>(i) / (ACCEL_POINTS - 1);
+        h.accel[i] = i == ACCEL_POINTS - 1 ? 0.0f : accel * std::max(0.2f, 1.0f - r * r);
+        h.accelOff[i] = h.accel[i] * 0.7f;
+    }
+    return h;
+}
+
+float Handling::accelAt(float v, bool offRoad) const
+{
+    const auto& a = offRoad ? accelOff : accel;
+    if (top <= 0.0f) return 0.0f;
+    const float x = std::clamp(v / top, 0.0f, 1.0f) * (ACCEL_POINTS - 1);
+    const int i = std::min(static_cast<int>(x), ACCEL_POINTS - 2);
+    const float t = x - static_cast<float>(i);
+    // Within a whisker of the top speed it still creeps up to it.
+    return std::max(a[i] + (a[i + 1] - a[i]) * t, v < top ? 0.05f : 0.0f);
+}
+
+float Handling::accelTime(float from, float to) const
+{
+    if (to > top || to <= from) return 0.0f;
+    float t = 0.0f;
+    const float dv = 0.05f;
+    for (float v = std::max(0.0f, from); v < to; v += dv) t += dv / std::max(accelAt(v + dv * 0.5f, false), 0.01f);
+    return t;
+}
+
 bool Driving::loadVehicles(const std::string& path, std::string& error)
 {
     std::ifstream in(path);
@@ -84,9 +121,9 @@ bool Driving::loadVehicles(const std::string& path, std::string& error)
         error = path + ": not a DiamondNav vehicles file";
         return false;
     }
-    if (version != 1) {
+    if (version != 1 && version != 2) {
         error = path + ": vehicles file version " + std::to_string(version)
-            + ", this build reads 1 (rebuild it with tools/dnav.py vehicles)";
+            + ", this build reads 1 and 2 (rebuild it with tools/dnav.py vehicles)";
         return false;
     }
     std::unordered_map<int, Handling> table;
@@ -97,11 +134,27 @@ bool Driving::loadVehicles(const std::string& path, std::string& error)
         if (hash != std::string::npos) line.resize(hash);
         std::istringstream t(line);
         int model;
-        Handling h;
         if (!(t >> model)) continue;            // blank or a comment
-        if (!(t >> h.top >> h.accel >> h.brake >> h.grip >> h.radius) || h.top <= 0.0f || h.accel <= 0.0f
-            || h.brake <= 0.0f || h.grip <= 0.0f || h.radius <= 0.0f) {
-            error = path + ":" + std::to_string(no) + ": takes MODEL TOP ACCEL BRAKE GRIP RADIUS, all above 0";
+        if (version == 1) {
+            float top, accel, brake, grip, radius;
+            if (!(t >> top >> accel >> brake >> grip >> radius) || top <= 0.0f || accel <= 0.0f || brake <= 0.0f
+                || grip <= 0.0f || radius <= 0.0f) {
+                error = path + ":" + std::to_string(no) + ": takes MODEL TOP ACCEL BRAKE GRIP RADIUS, all above 0";
+                return false;
+            }
+            table[model] = Handling::simple(top, accel, brake, grip, radius);
+            continue;
+        }
+        Handling h;
+        bool ok = static_cast<bool>(t >> h.top >> h.brake >> h.brakeOff >> h.coast >> h.drag >> h.grip >> h.gripOff
+            >> h.radius >> h.yaw >> h.reverse >> h.length >> h.width >> h.height >> h.wheelbase);
+        for (int i = 0; ok && i < ACCEL_POINTS; i++) ok = static_cast<bool>(t >> h.accel[i]);
+        for (int i = 0; ok && i < ACCEL_POINTS; i++) ok = static_cast<bool>(t >> h.accelOff[i]);
+        if (!ok || h.top <= 0.0f || h.brake <= 0.0f || h.brakeOff <= 0.0f || h.grip <= 0.0f || h.gripOff <= 0.0f
+            || h.radius <= 0.0f || h.yaw <= 0.0f || h.reverse <= 0.0f || h.coast < 0.0f || h.drag < 0.0f
+            || h.accel[0] <= 0.0f) {
+            error = path + ":" + std::to_string(no) + ": takes MODEL and " + std::to_string(14 + 2 * ACCEL_POINTS)
+                + " numbers (tools/dnav.py vehicles), the speeds, brakes, grip, turning and acceleration above 0";
             return false;
         }
         table[model] = h;
@@ -153,7 +206,7 @@ std::vector<float> Driving::plan(const std::vector<Point>& points, const std::ve
         const RoadClass c = i < classes.size() ? classes[i] : RoadClass::Street;
         float v = roadSpeed(c, car, style, cap);
         const float r = std::max(cornerRadius(points, i), car.radius);
-        v = std::min(v, std::sqrt(car.grip * use.grip * r));
+        v = std::min(v, std::sqrt((c == RoadClass::OffRoad ? car.gripOff : car.grip) * use.grip * r));
         // Junctions slow a driver who keeps to the limits; a highway's are merges.
         if (use.limit > 0.0f && c != RoadClass::Highway && i < junctions.size() && junctions[i])
             v = std::min(v, limit(c) * use.junction);

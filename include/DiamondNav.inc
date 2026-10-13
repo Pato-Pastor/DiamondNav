@@ -24,7 +24,7 @@
 #endif
 #define _DiamondNav_included
 
-#define DIAMONDNAV_INCLUDE_VERSION      (10200)     // 1.2.0
+#define DIAMONDNAV_INCLUDE_VERSION      (10300)     // 1.3.0
 
 // ── Results ──────────────────────────────────────────────────────────────────
 
@@ -70,6 +70,24 @@
 #define NAV_STYLE_PURSUIT       (3)     // no limits: as fast as the car and the corners allow
                                         // (Nav_Chase's default)
 #define NAV_STYLE_DEFAULT       (-1)    // Nav_SetDriveStyle: back to the default
+
+// Nav_GetVehicleInfo: what to read about a model (vehicles.dnv, from handling.cfg).
+#define NAV_VINFO_TOP_KMH       (0)     // top speed on the flat
+#define NAV_VINFO_ACCEL         (1)     // pulling away, m/s^2
+#define NAV_VINFO_BRAKE         (2)     // full brakes on a road, m/s^2
+#define NAV_VINFO_BRAKE_OFFROAD (3)     // ... on dirt
+#define NAV_VINFO_COAST         (4)     // rolling with no throttle, m/s^2
+#define NAV_VINFO_DRAG          (5)     // the air's deceleration per (m/s)^2
+#define NAV_VINFO_GRIP          (6)     // sideways in a corner on a road, m/s^2
+#define NAV_VINFO_GRIP_OFFROAD  (7)     // ... on dirt
+#define NAV_VINFO_RADIUS        (8)     // the tightest circle its centre turns, m
+#define NAV_VINFO_YAW           (9)     // how fast it can start turning, rad/s^2
+#define NAV_VINFO_REVERSE_KMH   (10)    // top speed backing up
+#define NAV_VINFO_LENGTH        (11)    // m, from its collision
+#define NAV_VINFO_WIDTH         (12)
+#define NAV_VINFO_HEIGHT        (13)
+#define NAV_VINFO_WHEELBASE     (14)    // m, from where its wheels are
+#define NAV_VINFO_ZERO_100      (15)    // seconds from 0 to 100 km/h (0: it never gets there)
 
 // ── Information ──────────────────────────────────────────────────────────────
 
@@ -129,10 +147,22 @@ native Float:Nav_GetRoadSpeed(roadClass);
 
 // How a vehicle model drives: top speed (km/h), acceleration and hardest braking
 // (m/s^2), the most sideways acceleration it holds in a corner (m/s^2) and its
-// tightest turning circle (m). Setting it overrides vehicles.dnv for that model.
-// Without either, a model drives as an average car.
+// tightest turning circle (m). Setting it overrides vehicles.dnv for that model with
+// these five numbers (its acceleration then fades towards its top speed; dirt takes
+// 30% of its grip and brakes). Without either, a model drives as an average car.
 native bool:Nav_SetVehicleHandling(modelid, Float:topKmh, Float:accel, Float:brake, Float:grip, Float:radius);
 native bool:Nav_GetVehicleHandling(modelid, &Float:topKmh, &Float:accel, &Float:brake, &Float:grip, &Float:radius);
+
+// Everything else vehicles.dnv knows about a model, one number at a time (NAV_VINFO_*).
+native Float:Nav_GetVehicleInfo(modelid, info);
+
+// A model's full-throttle acceleration (m/s^2) at a speed, on a road or on dirt:
+// its gears, engine, the air and what its tyres put down.
+native Float:Nav_GetVehicleAccel(modelid, Float:speedKmh, bool:offRoad = false);
+
+// Seconds a model takes from one speed to another at full throttle on a road (0 when
+// it never gets there).
+native Float:Nav_GetVehicleAccelTime(modelid, Float:fromKmh, Float:toKmh);
 
 // Vehicle models vehicles.dnv gave handling for; 0 without it.
 native Nav_GetVehicleModelCount();

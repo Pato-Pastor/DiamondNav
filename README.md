@@ -5,9 +5,11 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 - **Walking:** NPCs find their way on foot round walls, up stairs and across
   bridges, on a navmesh baked from the game world's collision (Recast/Detour).
 - **Driving:** NPC drivers follow the roads and keep to their lane, on a road graph
-  built from GTA's own traffic paths. They drive like their car: top speed,
-  acceleration, braking, grip and turning circle come from the game's own
-  handling data. Each road has a speed limit by its class (highway, main road,
+  built from GTA's own traffic paths. They drive like their car: GTA's own vehicle
+  physics are run offline on each model's handling data (gears, engine, drag,
+  tyres, brakes, steering, turn mass, off-road ability) and the size of its model,
+  so each pulls away, tops out, brakes, corners and turns in as it does in the
+  game, on a road and on dirt. Each road has a speed limit by its class (highway, main road,
   street, minor road, service road), they brake in time for corners and junctions,
   and a driving style (cautious, normal, fast, pursuit) sets how hard they push.
 - **Chasing:** an NPC driver chases a player along the roads, and off them across a
@@ -61,7 +63,7 @@ loaded:
 [nav] loaded roads.dnr: <nodes> road nodes, <links> links
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
-[nav] DiamondNav 1.2.0: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.0: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -150,11 +152,23 @@ remove 1600 -1700 1700 -1600           # this map builds over the stock road her
 python navtools/dnav.py vehicles navmesh/vehicles.dnv --gta "C:/Games/GTA San Andreas"
 ```
 
-This reads the game's `data/handling.cfg` and `data/vehicles.ide` and writes each
-model's top speed, acceleration, braking, cornering grip and turning circle.
-Without it every car drives as the same average car. The conversion from the
-game's units is an estimate: if a model feels wrong, set it from your script with
-`Nav_SetVehicleHandling`.
+This runs GTA's own vehicle physics for every model, once, on your PC: the gearbox
+(gears, the first- and second-gear boosts, the speed-limit flag), the engine's
+acceleration and inertia, air drag, the tyres (traction, traction loss, the
+front/rear bias, wheelspin), the brakes and their bias, from `data/handling.cfg`
+(and its bike lines: how far a bike leans); how well tyres grip a road and dirt
+from `data/surface.dat` (with the off-road ability flags); and each model's
+wheelbase, track and size from its DFF in `models/gta3.img`. It writes each model's
+acceleration at every speed on a road and on dirt, top speed, braking, cornering
+grip (the weaker axle, a bike's lean, the roll a tall vehicle takes), turning
+circle, how fast it can start to turn (its turn mass), reverse speed and size. A
+car with the Infernus's line tops out at 221 km/h, as measured in the game (222),
+not handling.cfg's 240.
+
+Without it every car drives as the same average car. To check a model against the
+real game, drive it yourself with a timer (Diamond City's `/navtest measure` shows
+its top speed, 0-100 km/h, braking and cornering next to these), and if one is off,
+set it from your script with `Nav_SetVehicleHandling`.
 
 ### Checking a bake
 
@@ -181,7 +195,8 @@ car, more for a truck).
 
 **How cars drive.** A driver steers like a car: it looks ahead along its path,
 turns no tighter than its turning circle (nor, at speed, than its grip holds),
-pulls away as its handling allows (the pull fades towards its top speed) and
+eases into and out of turns as fast as its turn mass lets it, pulls away as its
+own gears and engine allow at each speed (less on dirt) and
 brakes in time to take each corner, junction or lower limit at the speed it
 allows, then to stop at the end. What sets the speed:
 
@@ -191,7 +206,9 @@ allows, then to stop at the end. What sets the speed:
   (GTA's low-traffic roads), `NAV_CLASS_SERVICE` 30 (emergency-only roads) and
   `NAV_CLASS_OFFROAD` 60 (the car navmesh). A custom roads file marks its own with
   `main` / `minor` on a node.
-- **The car**, from `vehicles.dnv` or `Nav_SetVehicleHandling`.
+- **The car**, from `vehicles.dnv` or `Nav_SetVehicleHandling`; read any of it with
+  `Nav_GetVehicleInfo` (`NAV_VINFO_*`), `Nav_GetVehicleAccel` and
+  `Nav_GetVehicleAccelTime`.
 - **The style**, `Nav_SetDriveStyle(npcid, style)`: `NAV_STYLE_CAUTIOUS` (under the
   limits, gentle), `NAV_STYLE_NORMAL` (the limits; `Nav_DriveTo`'s default),
   `NAV_STYLE_FAST` (a quarter over, brisk corners, late braking) and

@@ -56,22 +56,34 @@ inst
 9006, yard_shed, 0, {YX - 20}, {YY - 20}, {YZ}, 0, 0, 0, 1, -1
 end
 """)
-    # How three made-up vehicles drive, and a boat that does not (vehicles.dnv).
+    # How four made-up vehicles drive, and a boat that does not (vehicles.dnv). The
+    # lines carry every handling.cfg column; the sultan's DFF is in gta3.img.
     (root / "data" / "handling.cfg").write_text("""; a made-up handling.cfg
-SULTAN 1400.0 3400.0 2.0 0.0 0.1 -0.1 75 0.80 0.80 0.50 5 170.0 30.0 10.0 4 P 8.0 0.50 0 30.0 1.0 0.1
-LINERUN 3800.0 19953.2 5.0 0.0 0.0 -0.65 90 0.65 0.85 0.5 5 120.0 14.0 25.0 R D 3.17 0.4 0 25.0 1.0 0.1
-NRG500 400.0 200.0 4.0 0.0 0.08 -0.09 103 1.80 0.90 0.48 5 190.0 50.0 5.0 R P 15.0 0.50 0 35.0 1.0 0.1
-REEFER 5000.0 30000.0 0.8 0.0 0.0 0.0 7 2.2 15.0 0.65 5 190.0 0.2 5.0 R P 0.04 0.80 0 26.0 1.0 0.1
+SULTAN 1400.0 3400.0 2.4 0.0 0.1 -0.1 75 0.80 0.80 0.50 5 200.0 28.0 5.0 4 P 10.0 0.50 0 30.0 1.2 0.15 0.0 0.28 -0.20 0.50 0.30 0.25 0.60 35000 2800 4000002 1 1 0
+LINERUN 3800.0 19953.2 5.0 0.0 0.0 -0.2 90 0.95 0.65 0.40 5 120.0 25.0 30.0 R D 8.0 0.30 0 25.0 1.6 0.06 0.0 0.40 -0.20 0.50 0.00 0.65 0.25 35000 6000 200 0 1 2
+SANDKING 2000.0 4000.0 2.5 0.0 0.0 -0.6 80 0.75 0.85 0.50 5 170.0 30.0 5.0 4 P 7.0 0.45 0 35.0 1.0 0.08 0.0 0.35 -0.30 0.50 0.30 0.44 0.35 40000 28 200000 0 1 0
+NRG500 400.0 200.0 4.0 0.0 0.08 -0.09 103 1.80 0.90 0.48 5 190.0 60.0 5.0 R P 15.0 0.50 0 35.0 0.85 0.15 0.0 0.15 -0.16 0.50 0.00 0.00 0.15 10000 1002000 2 1 1 4
+REEFER 5000.0 30000.0 0.8 0.0 0.0 0.0 7 2.2 15.0 0.65 5 190.0 0.2 5.0 R P 0.04 0.80 0 26.0 1.0 0.1 0.0 0.1 -0.1 0.5 0.0 0.0 0.1 10000 8000000 0 0 0 0
 % REEFER 0.5 3.5 0.7 7.0 0.6 4.0 0.7 1.0 2.0 1.0
-! NRG500 0.15 0.15 1.20 1.80 0.40 0.50 26.0 0.75 0.90 0.20
+! NRG500 0.35 0.15 0.34 0.10 45.0 38.0 0.93 0.70 0.50 0.10 35.0 -40.0 -0.009 0.70 0.60
 """)
     (root / "data" / "vehicles.ide").write_text("""# made-up vehicles
 cars
 560, sultan, sultan, car, SULTAN, SULTAN, null, richfamily, 10, 0, 0, -1, 0.7, 0.7, 2
 403, linerun, linerun, car, LINERUN, LINERUN, null, worker, 10, 0, 0, -1, 1.0, 1.0, -1
+495, sandking, sandking, car, SANDKING, SANDKING, null, normal, 10, 0, 0, -1, 1.0, 1.0, -1
 522, nrg500, nrg500, bike, NRG500, NRG500, bikes, motorbike, 10, 0, 0, 16, 0.5, 0.5, -1
 453, reefer, reefer, boat, REEFER, REEFER, null, ignore, 10, 0, 0
 end
+""")
+    (root / "data" / "surface.dat").write_text("""; made-up adhesive limits
+;\trubber\thard\troad\tloose\tsand\twet
+RUBBER\t6.0
+HARD\t3.6\t2.0
+ROAD\t4.5\t3.0\t6.0
+LOOSE\t3.2\t3.5\t2.0\t1.0
+SAND\t3.0\t4.0\t2.0\t1.0\t1.0
+WET\t2.8\t2.0\t1.0\t1.0\t1.0\t0.5
 """)
     (root / "data" / "water.dat").write_text(
         "processed\n" + " ".join(f"{x} {y} {YZ - 1.0} 0 0 0 0" for x, y in
@@ -101,6 +113,16 @@ end
         "yard_stream0.ipl": fg.binary_ipl([(YX + 100, YY, YZ, 0, 0, 0, 1, 9004)]),
         "nodes0.dat": a0,
         "nodes1.dat": a1,
+        # The sultan: wheels under a chassis frame 0.1 m up, 2.6 m apart and 1.6 m
+        # wide, in a 4.6 x 2.0 x 1.4 m collision box.
+        "sultan.dff": fg.vehicle_dff([
+            ("sultan", (0, 0, 0), -1),
+            ("chassis_dummy", (0, 0, 0.1), 0),
+            ("wheel_rf_dummy", (0.8, 1.35, -0.4), 1),
+            ("wheel_lf_dummy", (-0.8, 1.35, -0.4), 1),
+            ("wheel_rb_dummy", (0.8, -1.25, -0.4), 1),
+            ("wheel_lb_dummy", (-0.8, -1.25, -0.4), 1),
+        ], fg.col3("sultan", fg.box_tris((-1.0, -2.3, -0.65), (1.0, 2.3, 0.75)))),
     })
 
 
@@ -368,30 +390,79 @@ class Roads(unittest.TestCase):
 
 
 class Vehicles(unittest.TestCase):
+    HEAD = ("top", "brake", "brake_off", "coast", "drag", "grip", "grip_off", "radius", "yaw", "reverse",
+            "length", "width", "height", "wheelbase")
+
+    def read(self, path):
+        from dnavlib import vehicles
+        lines = path.read_text().splitlines()
+        self.assertEqual(lines[0], "DNVH 2")
+        rows = {}
+        for line in lines[1:]:
+            if line.startswith("#"):
+                continue
+            t = line.split("#")[0].split()
+            nums = [float(v) for v in t[1:]]
+            self.assertEqual(len(nums), len(self.HEAD) + 2 * vehicles.CURVE)
+            row = dict(zip(self.HEAD, nums))
+            row["accel"] = nums[len(self.HEAD):len(self.HEAD) + vehicles.CURVE]
+            row["accel_off"] = nums[len(self.HEAD) + vehicles.CURVE:]
+            rows[int(t[0])] = row
+        return rows
+
     def test_from_handling(self):
         from dnavlib import vehicles
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             make_install(root / "gta")
             out = root / "vehicles.dnv"
-            self.assertEqual(vehicles.build(out, root / "gta"), 3)          # not the boat
-            lines = out.read_text().splitlines()
-            self.assertEqual(lines[0], "DNVH 1")
-            rows = {int(t[0]): [float(v) for v in t[1:6]] for t in (l.split() for l in lines[1:] if l[0] != "#")}
-            self.assertEqual(sorted(rows), [403, 522, 560])
-            sultan, truck, bike = rows[560], rows[403], rows[522]
-            self.assertAlmostEqual(sultan[0], 170.0 * 0.9 / 3.6, places=2)    # top, m/s
-            self.assertGreater(sultan[0], truck[0])
-            self.assertGreater(sultan[1], truck[1] * 2)                     # accel
-            self.assertGreater(sultan[2], truck[2])                         # brake
-            self.assertGreater(sultan[3], truck[3])                         # grip
-            self.assertLess(bike[4], sultan[4])                             # turning circle
-            self.assertLess(sultan[4], truck[4])
-            for v in rows.values():
-                for (lo, hi), x in zip(vehicles.LIMITS.values(), v):
-                    self.assertTrue(lo <= x <= hi)
+            self.assertEqual(vehicles.build(out, root / "gta"), 4)          # not the boat
+            rows = self.read(out)
+            self.assertEqual(sorted(rows), [403, 495, 522, 560])
+            sultan, truck, sand, bike = rows[560], rows[403], rows[495], rows[522]
+            self.assertGreater(sultan["top"], truck["top"])
+            self.assertGreater(sultan["accel"][0], truck["accel"][0] * 1.4)
+            self.assertGreater(sultan["grip"], 10.0)
+            self.assertLess(bike["radius"], sultan["radius"])
+            self.assertLess(sultan["radius"], truck["radius"])
+            self.assertLess(truck["yaw"], sultan["yaw"])                     # a heavy turn mass
+            self.assertGreater(truck["reverse"], 0.0)
+            for r in rows.values():
+                self.assertGreater(r["accel"][0], 0.0)
+                self.assertEqual(r["accel"][-1], 0.0)                       # nothing left at the top
+                for a, o in zip(r["accel"], r["accel_off"]):
+                    self.assertLessEqual(o, a + 1e-6)                       # dirt never pulls harder
+                self.assertLessEqual(r["grip_off"], r["grip"] + 1e-6)
+            # The sultan's size comes from its DFF: wheels 2.6 m apart under a chassis
+            # frame, its collision box.
+            self.assertAlmostEqual(sultan["wheelbase"], 2.6, places=2)
+            self.assertAlmostEqual(sultan["length"], 4.6, places=1)
+            self.assertAlmostEqual(sultan["width"], 2.0, places=1)
+            # Dirt: tyres grip it 3.2 / 4.5 as well as a road (surface.dat); the
+            # Sandking's off-road ability puts back 40% of that.
+            self.assertAlmostEqual(sultan["grip_off"] / sultan["grip"], 3.2 / 4.5, places=2)
+            self.assertAlmostEqual(sand["grip_off"] / sand["grip"], 3.2 * 1.4 / 4.5, places=2)
+            # The bike leans no further than its bike line's 45 degrees allow.
+            self.assertLessEqual(bike["grip"], vehicles.GRAVITY * vehicles.TO_MS2 * 1.0 + 0.01)
         with self.assertRaises(SystemExit):
             vehicles.build(Path(tmp) / "x.dnv", Path(tmp) / "nowhere")
+
+    def test_game_physics(self):
+        """A car with the Infernus's numbers tops out where the game's does (222 km/h
+        measured in game), well short of its handling.cfg's 240, and its gears pull
+        hardest in first."""
+        from dnavlib import vehicles
+        line = ("INFERNUS 1400.0 2725.3 1.5 0.0 0.0 -0.25 70 0.70 0.80 0.50 5 240.0 30.0 10.0 4 P 11.0 0.51 0 30.0 "
+                "1.2 0.19 0.0 0.25 -0.10 0.50 0.40 0.37 0.72 95000 40002004 C04000 1 1 1")
+        ide = "cars\n411, infernus, infernus, car, INFERNUS, INFERNUS, null, executive, 10, 0, 0, -1, 0.7, 0.7, -1\nend\n"
+        (_model, _name, m), = vehicles.models(line, ide)
+        self.assertAlmostEqual(m.top * 3.6, 222.0, delta=4.0)
+        self.assertGreater(m.accel[0], m.accel[8])
+        self.assertTrue(2.0 < m.zero100 < 5.0)
+        # With the USE_MAXSP_LIMIT flag its gears run to handling.cfg's own top speed.
+        flagged = line.replace("C04000", "1C04000")
+        (_m2, _n2, f), = vehicles.models(flagged, ide)
+        self.assertAlmostEqual(f.top * 3.6, 240.0, delta=2.0)
 
 
 if __name__ == "__main__":

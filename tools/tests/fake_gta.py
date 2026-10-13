@@ -137,3 +137,18 @@ def zquat_ipl(deg):
     """A rotation about z, as an IPL stores it (conjugated)."""
     s, c = math.sin(math.radians(deg) / 2), math.cos(math.radians(deg) / 2)
     return (0.0, 0.0, -s, c)
+
+
+def vehicle_dff(frames, col_entry: bytes | None = None) -> bytes:
+    """A vehicle DFF: a frame list (name, position, parent index) and, optionally, the
+    collision plugin. Frames have no rotation."""
+    def chunk(kind, body):
+        return struct.pack("<3I", kind, len(body), 0x1803FFFF) + body
+    data = struct.pack("<I", len(frames))
+    for _name, pos, parent in frames:
+        data += struct.pack("<12fiI", 1, 0, 0, 0, 1, 0, 0, 0, 1, *pos, parent, 0)
+    exts = b"".join(chunk(0x03, chunk(0x253F2FE, name.encode())) for name, _p, _q in frames)
+    body = chunk(0x01, struct.pack("<3I", 0, 0, 0)) + chunk(0x0E, chunk(0x01, data) + exts)
+    if col_entry:
+        body += chunk(0x03, chunk(0x253F2FA, col_entry))
+    return chunk(0x10, body)

@@ -76,13 +76,24 @@ public OnGameModeInit()
     if (!Nav_GetTileCount(NAV_MESH_CAR)) Fail("no car navmesh loaded");
     if (!Nav_GetRoadNodeCount()) Fail("no road graph loaded");
 
-    // vehicles.dnv, from the yard's made-up handling.cfg: a Sultan, a Linerunner, a bike.
+    // vehicles.dnv, from the yard's made-up handling.cfg: a Sultan (its DFF in gta3.img),
+    // a Linerunner, a Sandking, a bike.
     new Float:top, Float:accel, Float:brake, Float:grip, Float:radius;
-    if (Nav_GetVehicleModelCount() != 3) Fail("vehicles.dnv did not give 3 models");
+    if (Nav_GetVehicleModelCount() != 4) Fail("vehicles.dnv did not give 4 models");
     Nav_GetVehicleHandling(560, top, accel, brake, grip, radius);
-    if (floatabs(top - 153.0) > 1.0 || floatabs(accel - 6.4) > 0.01) Fail("the Sultan's handling is not vehicles.dnv's");
+    if (floatabs(top - 168.8) > 1.0 || floatabs(accel - 11.52) > 0.05) Fail("the Sultan's handling is not vehicles.dnv's");
+    if (floatabs(Nav_GetVehicleInfo(560, NAV_VINFO_WHEELBASE) - 2.6) > 0.01
+        || floatabs(Nav_GetVehicleInfo(560, NAV_VINFO_LENGTH) - 4.6) > 0.01) Fail("the Sultan's size is not its DFF's");
+    new Float:z100 = Nav_GetVehicleInfo(560, NAV_VINFO_ZERO_100);
+    if (z100 < 2.5 || z100 > 3.5) Fail("the Sultan's 0-100 km/h is not about 2.9 s");
+    if (Nav_GetVehicleAccel(560, 120.0) >= Nav_GetVehicleAccel(560, 20.0)) Fail("the Sultan pulls as hard at 120 km/h as at 20");
+    if (Nav_GetVehicleAccel(560, 20.0, true) >= Nav_GetVehicleAccel(560, 20.0)) Fail("the Sultan pulls as hard on dirt");
+    if (Nav_GetVehicleInfo(403, NAV_VINFO_YAW) >= Nav_GetVehicleInfo(560, NAV_VINFO_YAW))
+        Fail("the Linerunner swings round as fast as the Sultan");
+    if (Nav_GetVehicleInfo(495, NAV_VINFO_GRIP_OFFROAD) < Nav_GetVehicleInfo(495, NAV_VINFO_GRIP) * 0.95)
+        Fail("the Sandking's off-road ability is lost");
     Nav_GetVehicleHandling(403, top, accel, brake, grip, radius);
-    if (floatabs(accel - 1.6) > 0.01) Fail("the Linerunner's handling is not vehicles.dnv's");
+    if (floatabs(top - 109.5) > 1.0) Fail("the Linerunner's handling is not vehicles.dnv's");
     if (!Nav_SetRoadSpeed(NAV_CLASS_MAIN, 36.0) || !Nav_SetRoadSpeed(NAV_CLASS_STREET, 72.0)) Fail("Nav_SetRoadSpeed refused");
     if (floatabs(Nav_GetRoadSpeed(NAV_CLASS_MAIN) - 36.0) > 0.01) Fail("Nav_GetRoadSpeed is not what was set");
     if (Nav_SetRoadSpeed(99, 50.0) || Nav_SetDriveStyle(0, 99)) Fail("a bad class or style was taken");
@@ -162,12 +173,17 @@ public Watch()
     new Float:x, Float:y, Float:z;
     WatchDriver();
     if (!gTruckChecked && GetTickCount() - gTruckStart >= 3000) {
-        // 3 s at its 1.6 m/s^2 is 7.2 m; a Sultan would be 25 m on.
+        // How far its own acceleration (gears, engine, air, tyres) takes it in 3 s at
+        // full throttle, as pursuit drives; a Sultan's would take it a good deal further.
         gTruckChecked = true;
         GetVehiclePos(gTruckCar, x, y, z);
-        new Float:gone = floatabs(x - (YX - 60.0));
-        printf("[dnav-test] the truck went %.1f m in its first 3 s", gone);
-        gTruckSlow = gone > 2.0 && gone < 9.5;
+        new Float:gone = floatabs(x - (YX - 60.0)), Float:v, Float:d, Float:sv, Float:sd;
+        for (new i = 0; i < 60; i++) {
+            v += Nav_GetVehicleAccel(403, v * 3.6) * 0.05, d += v * 0.05;
+            sv += Nav_GetVehicleAccel(560, sv * 3.6) * 0.05, sd += sv * 0.05;
+        }
+        printf("[dnav-test] the truck went %.1f m in its first 3 s (its handling: %.1f m, a Sultan's: %.1f m)", gone, d, sd);
+        gTruckSlow = gone > d * 0.4 && gone < d * 1.15 && gone < sd * 0.8;
     }
     NPC_GetPos(gWalker, x, y, z);
     // The wall: 0.5 m thick along y at x = YX, 20 m long.

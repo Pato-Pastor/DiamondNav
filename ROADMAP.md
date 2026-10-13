@@ -48,7 +48,18 @@ native (or a few) that a script calls on an NPC it already made.
 - Driving styles (`Nav_SetDriveStyle`): cautious, normal, fast, pursuit.
 - `Nav_GetDriveInfo`, `Nav_GetPathPointClass`.
 
-## 1.3: traffic
+## 1.3: the game's own handling (done)
+
+- `dnav.py vehicles` runs GTA's vehicle physics offline on every handling.cfg
+  column: the gearbox, engine inertia, drag, tyres and wheelspin, brakes, steering,
+  turn mass, off-road ability, bike lean; surface.dat for road and dirt; each
+  model's DFF for its wheelbase, track and size. vehicles.dnv version 2 carries an
+  acceleration table per model (road and dirt) and the rest.
+- Drivers pull away by that table, brake and corner on dirt by the dirt numbers, and
+  ease into turns by the turn mass.
+- `Nav_GetVehicleInfo`, `Nav_GetVehicleAccel`, `Nav_GetVehicleAccelTime`.
+
+## 1.4: traffic
 
 - **`Nav_Cruise(npcid, speed, flags)`**: a driver drives around the road network on
   its own, picking turns at random (or towards an area), in its lane.
@@ -57,7 +68,7 @@ native (or a few) that a script calls on an NPC it already made.
   - Ends only on `Nav_Stop`, or when the NPC leaves the car.
 - `Nav_DriveTo` gets the same spacing and junction behaviour.
 
-## 1.4: pedestrians
+## 1.5: pedestrians
 
 - **`Nav_Wander(npcid, radius, flags)`**: a ped walks to random points around it,
   preferring sidewalks; the walking navmesh marks road surface as costly (from

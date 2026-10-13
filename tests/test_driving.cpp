@@ -157,8 +157,8 @@ static void corners()
 static void plans()
 {
     Driving d;
-    Handling sports { 60.0f, 6.0f, 10.0f, 9.0f, 5.0f };
-    Handling truck { 30.0f, 1.5f, 4.0f, 5.0f, 9.0f };
+    const Handling sports = Handling::simple(60.0f, 6.0f, 10.0f, 9.0f, 5.0f);
+    const Handling truck = Handling::simple(30.0f, 1.5f, 4.0f, 5.0f, 9.0f);
     const std::vector<Point> line = { { 0, 0, 0 }, { 500, 0, 0 }, { 1000, 0, 0 } };
     const std::vector<RoadClass> highway(3, RoadClass::Highway), street(3, RoadClass::Street);
     const std::vector<uint8_t> none(3, 0);
@@ -166,7 +166,7 @@ static void plans()
     // The limit for the style, and never over the car's top speed.
     CHECK(near(d.plan(line, highway, none, sports, DriveStyle::Normal, 0.0f)[1], 130.0f * KMH, 0.01f));
     CHECK(near(d.plan(line, highway, none, sports, DriveStyle::Fast, 0.0f)[1], 130.0f * KMH * 1.25f, 0.01f));
-    CHECK(near(d.plan(line, highway, none, Handling { 40.0f, 6.0f, 10.0f, 9.0f, 5.0f }, DriveStyle::Fast, 0.0f)[1],
+    CHECK(near(d.plan(line, highway, none, Handling::simple(40.0f, 6.0f, 10.0f, 9.0f, 5.0f), DriveStyle::Fast, 0.0f)[1],
         40.0f, 0.01f));     // 162 km/h is past this car's top speed
     CHECK(near(d.plan(line, highway, none, sports, DriveStyle::Cautious, 0.0f)[1], 130.0f * KMH * 0.85f, 0.01f));
     CHECK(near(d.plan(line, highway, none, truck, DriveStyle::Normal, 0.0f)[1], 30.0f, 0.01f));
@@ -210,23 +210,63 @@ static void vehicles()
     CHECK(d.loadVehicles("driving_vehicles.dnv", error));
     CHECK(d.vehicleCount() == 2);
     CHECK(near(d.handling(560).top, 50.0f, 0.001f) && near(d.handling(560).radius, 5.2f, 0.001f));
-    CHECK(near(d.handling(403).accel, 1.6f, 0.001f));
+    CHECK(near(d.handling(403).accel[0], 1.6f, 0.001f));
     // An unknown model drives as the default car; a script's handling wins.
     CHECK(near(d.handling(411).top, Handling {}.top, 0.001f));
-    d.setHandling(560, Handling { 20.0f, 2.0f, 3.0f, 4.0f, 6.0f });
+    d.setHandling(560, Handling::simple(20.0f, 2.0f, 3.0f, 4.0f, 6.0f));
     CHECK(near(d.handling(560).top, 20.0f, 0.001f));
 
-    { std::ofstream("driving_bad1.dnv") << "DNVH 2\n560 1 1 1 1 1\n"; }
+    { std::ofstream("driving_bad1.dnv") << "DNVH 2\n560 1 1 1 1 1\n"; }      // too few for version 2
     { std::ofstream("driving_bad2.dnv") << "DNVH 1\n560 50 5 9\n"; }
     { std::ofstream("driving_bad3.dnv") << "something else\n"; }
     { std::ofstream("driving_bad4.dnv") << "DNVH 1\n560 50 5 9 -1 5\n"; }
+    { std::ofstream("driving_bad5.dnv") << "DNVH 3\n"; }
     for (const char* bad : { "driving_bad1.dnv", "driving_bad2.dnv", "driving_bad3.dnv", "driving_bad4.dnv",
-             "driving_missing.dnv" }) {
+             "driving_bad5.dnv", "driving_missing.dnv" }) {
         Driving e;
         error.clear();
         CHECK(!e.loadVehicles(bad, error));
         CHECK(!error.empty());
     }
+}
+
+// vehicles.dnv version 2: the whole model, and its acceleration table.
+static void fullModels()
+{
+    {
+        std::ofstream out("driving_full.dnv");
+        out << "DNVH 2\n# model top brake brake_off coast drag grip grip_off radius yaw reverse length width height wheelbase ...\n";
+        // A car that pulls 10 m/s^2 up to half its 60 m/s and nothing at the top; on
+        // dirt half that.
+        out << "411 60 12.6 9 6.4 0.00075 15.8 11.2 4.7 5.3 15 4.6 2.0 1.4 2.6";
+        for (int i = 0; i < ACCEL_POINTS; i++) out << " " << (i < 8 ? 10.0f : 10.0f * (15 - i) / 7.0f);
+        for (int i = 0; i < ACCEL_POINTS; i++) out << " " << (i < 8 ? 5.0f : 5.0f * (15 - i) / 7.0f);
+        out << "  # infernus-ish\n";
+    }
+    Driving d;
+    std::string error;
+    CHECK(d.loadVehicles("driving_full.dnv", error));
+    const Handling h = d.handling(411);
+    CHECK(near(h.top, 60.0f, 0.001f) && near(h.brakeOff, 9.0f, 0.001f) && near(h.gripOff, 11.2f, 0.001f));
+    CHECK(near(h.yaw, 5.3f, 0.001f) && near(h.reverse, 15.0f, 0.001f) && near(h.wheelbase, 2.6f, 0.001f));
+    CHECK(near(h.accelAt(0.0f, false), 10.0f, 0.001f));
+    CHECK(near(h.accelAt(20.0f, false), 10.0f, 0.001f));
+    CHECK(near(h.accelAt(20.0f, true), 5.0f, 0.001f));
+    CHECK(h.accelAt(50.0f, false) < h.accelAt(40.0f, false));
+    CHECK(h.accelAt(59.9f, false) > 0.0f);                  // still creeps up to its top
+    CHECK(near(h.accelAt(60.0f, false), 0.0f, 0.001f));
+    CHECK(near(h.accelTime(0.0f, 20.0f), 2.0f, 0.05f));     // 10 m/s^2 for 20 m/s
+    CHECK(h.accelTime(0.0f, 100.0f) == 0.0f);               // past its top speed
+    // Off the road it corners on its dirt grip.
+    const std::vector<Point> sharp = { { 0, 0, 0 }, { 100, 0, 0 }, { 100, 100, 0 } };
+    const std::vector<RoadClass> off(3, RoadClass::OffRoad), street(3, RoadClass::Street);
+    const std::vector<uint8_t> none(3, 0);
+    CHECK(near(d.plan(sharp, off, none, h, DriveStyle::Pursuit, 0.0f)[1], std::sqrt(11.2f * 0.9f * 8.0f), 0.01f));
+    CHECK(near(d.plan(sharp, street, none, h, DriveStyle::Pursuit, 0.0f)[1], std::sqrt(15.8f * 0.9f * 8.0f), 0.01f));
+    // The five-number car: its acceleration fades towards its top speed.
+    const Handling s = Handling::simple(50.0f, 5.0f, 9.0f, 8.0f, 5.0f);
+    CHECK(near(s.accelAt(0.0f, false), 5.0f, 0.001f) && s.accelAt(40.0f, false) < 2.0f);
+    CHECK(near(s.gripOff, 8.0f * 0.7f, 0.001f));
 }
 
 int main()
@@ -236,6 +276,7 @@ int main()
     corners();
     plans();
     vehicles();
+    fullModels();
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;
