@@ -55,12 +55,14 @@ def chase_roads() -> bytes:
 # dnav_walls.pwn's world, north of the yard: solid ground at 10 m everywhere, and
 WALL_Y, DECK_Y, BLOCK_Y = tt.YY + 600, tt.YY + 900, tt.YY + 1200
 DECK_Z, GAP_X = 25.0, tt.YX - 24.0
+DRAIN_Y = tt.YY + 1500                  # a storm drain: road at z 10, a 45-degree bank, its floor at z 2
 
 
 def walls_world() -> bytes:
     """dnav_walls.pwn's collision: the ground; a wall 4 m tall across the way between a
     chaser and its target; a bridge deck 15 m up with a railing along its north side
-    but for one gap, 4 m wide; and a 2 m concrete block in a road's eastbound lane."""
+    but for one gap, 4 m wide; a 2 m concrete block in a road's eastbound lane; and a
+    storm drain, its floor 8 m down a 45-degree bank from the road beside it."""
     x, z = tt.YX, 10.0
     tris = []
 
@@ -80,6 +82,9 @@ def walls_world() -> bytes:
     box(x - 150, DECK_Y + 5.8, DECK_Z, GAP_X - 2, DECK_Y + 6, DECK_Z + 1)
     box(GAP_X + 2, DECK_Y + 5.8, DECK_Z, x + 150, DECK_Y + 6, DECK_Z + 1)
     box(x - 1, BLOCK_Y - 3.5, z, x + 1, BLOCK_Y - 1.5, z + 2)
+    quad((x - 500, BLOCK_Y + 150, z), (x + 500, BLOCK_Y + 150, z), (x + 500, DRAIN_Y - 10, z), (x - 500, DRAIN_Y - 10, z))
+    quad((x - 500, DRAIN_Y - 10, z), (x + 500, DRAIN_Y - 10, z), (x + 500, DRAIN_Y - 2, z - 8), (x - 500, DRAIN_Y - 2, z - 8))
+    quad((x - 500, DRAIN_Y - 2, z - 8), (x + 500, DRAIN_Y - 2, z - 8), (x + 500, DRAIN_Y + 40, z - 8), (x - 500, DRAIN_Y + 40, z - 8))
     flat = [c for t in tris for c in t]
     return b"DNTR" + struct.pack("<I", len(tris) // 3) + struct.pack(f"<{len(flat)}f", *flat)
 
@@ -91,8 +96,12 @@ def walls_roads() -> bytes:
     nodes = [(x - 60, WALL_Y, z), (x - 60, WALL_Y + 30, z), (x + 60, WALL_Y + 30, z), (x + 60, WALL_Y, z),
              (x - 150, DECK_Y, DECK_Z), (x, DECK_Y, DECK_Z), (x + 150, DECK_Y, DECK_Z), (x + 220, DECK_Y + 15, z + 7.5),
              (x + 150, DECK_Y + 30, z), (x, DECK_Y + 30, z), (x - 150, DECK_Y + 30, z),
-             (x - 150, BLOCK_Y, z), (x + 150, BLOCK_Y, z)]
-    pairs = [(0, 1), (1, 2), (2, 3), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (11, 12)]
+             (x - 150, BLOCK_Y, z), (x + 150, BLOCK_Y, z),
+             # the drain: a road beside it, down a ramp far to the east, back along its floor
+             (x - 150, DRAIN_Y - 25, z), (x + 150, DRAIN_Y - 25, z), (x + 400, DRAIN_Y - 25, z),
+             (x + 400, DRAIN_Y + 20, z - 8), (x + 150, DRAIN_Y + 20, z - 8), (x - 150, DRAIN_Y + 20, z - 8)]
+    pairs = [(0, 1), (1, 2), (2, 3), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (11, 12),
+             (13, 14), (14, 15), (15, 16), (16, 17), (17, 18)]
     links = {}
     for a, b in pairs:
         links.setdefault(a, []).append((0, b))

@@ -24,7 +24,7 @@
 #endif
 #define _DiamondNav_included
 
-#define DIAMONDNAV_INCLUDE_VERSION      (10304)     // 1.3.4
+#define DIAMONDNAV_INCLUDE_VERSION      (10305)     // 1.3.5
 
 // ── Results ──────────────────────────────────────────────────────────────────
 

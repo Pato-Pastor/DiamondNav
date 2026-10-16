@@ -5,7 +5,10 @@
 // - a bridge 15 m over a road with a railing along its edge but for one gap, 8 m along
 //   from where the straight line to the NPC below meets it: the chaser goes off
 //   through the gap, not through the railing, and lands on the ground below;
-// - a concrete block in a road's lane: a driver swerves round it.
+// - a concrete block in a road's lane: a driver swerves round it;
+// - a storm drain 8 m down a 45-degree bank from the road beside it, its own road
+//   reached by a ramp 400 m away: a chaser drives straight down the bank after the NPC
+//   on its floor, and never floats over it.
 
 #include <open.mp>
 #include <DiamondNav>
@@ -18,6 +21,7 @@
 #define DECK_Z (25.0)
 #define GAP_X (YX - 24.0)
 #define BLOCK_Y (YY + 1200.0)
+#define DRAIN_Y (YY + 1500.0)
 #define TIMEOUT_MS (60000)
 
 new gWaller = INVALID_NPC_ID, gWallQuarry = INVALID_NPC_ID, gWallCar = INVALID_VEHICLE_ID;
@@ -26,6 +30,8 @@ new gDodger = INVALID_NPC_ID, gDodgeCar = INVALID_VEHICLE_ID;
 new bool:gWallDone, bool:gThroughWall, Float:gWallNearest = 999.0;
 new bool:gJumpDone, bool:gThroughRail, bool:gWentAirborne, Float:gCrossX = 999.0, Float:gJumpLowest = 999.0, bool:gUnderGround;
 new bool:gDodged, bool:gHitBlock, Float:gJumpLastY = 2900.0;
+new gBanker = INVALID_NPC_ID, gBankQuarry = INVALID_NPC_ID, gBankCar = INVALID_VEHICLE_ID;
+new bool:gBankDone, bool:gBankFloated, Float:gBankMaxX = -9999.0, gBankStart;
 new gFailures, bool:gFinished;
 
 Fail(const what[])
@@ -50,6 +56,10 @@ Finish()
     printf("[dnav-test] block: arrived %d, hit it %d", gDodged, gHitBlock);
     if (!gDodged) Fail("the driver never got past the block");
     if (gHitBlock) Fail("the driver drove into the block");
+    printf("[dnav-test] drain: reached %d, floated %d, furthest east %.1f", gBankDone, gBankFloated, gBankMaxX);
+    if (!gBankDone) Fail("the chaser never got down into the drain");
+    if (gBankMaxX > YX + 100.0) Fail("the chaser went round by the ramp, not down the bank");
+    if (gBankFloated) Fail("the chaser floated over the drain");
     print(gFailures ? ("[dnav-test] FAILED") : ("[dnav-test] PASS"));
     SendRconCommand("exit");
 }
@@ -77,6 +87,12 @@ public OnGameModeInit()
     NPC_Spawn(gDodger);
     gDodgeCar = CreateVehicle(560, YX - 120.0, BLOCK_Y - 2.5, YZ + ride, 270.0, 0, 0, -1);
 
+    gBanker = NPC_Create("dnav_banker");
+    gBankQuarry = NPC_Create("dnav_bankq");
+    NPC_Spawn(gBanker);
+    NPC_Spawn(gBankQuarry);
+    gBankCar = CreateVehicle(560, YX - 40.0, DRAIN_Y - 25.0, YZ + ride, 180.0, 0, 0, -1);
+
     SetTimer("StartMoving", 500, false);
     SetTimer("Watch", 100, true);
     SetTimer("TimedOut", TIMEOUT_MS, false);
@@ -93,6 +109,11 @@ public StartMoving()
     NPC_SetPos(gJumpQuarry, YX, DECK_Y + 30.0, YZ + 1.0);
     NPC_PutInVehicle(gJumper, gJumpCar, 0);
     if (!Nav_Chase(gJumper, gJumpQuarry)) Fail("Nav_Chase refused the jumper");
+
+    NPC_SetPos(gBankQuarry, YX, DRAIN_Y + 15.0, YZ - 8.0 + 1.0);
+    NPC_PutInVehicle(gBanker, gBankCar, 0);
+    if (!Nav_Chase(gBanker, gBankQuarry)) Fail("Nav_Chase refused the banker");
+    gBankStart = GetTickCount();
 
     NPC_PutInVehicle(gDodger, gDodgeCar, 0);
     if (!Nav_DriveTo(gDodger, YX + 120.0, BLOCK_Y, YZ + 1.0)) Fail("Nav_DriveTo refused the dodger");
@@ -161,7 +182,23 @@ public Watch()
         }
     }
 
-    if (gWallDone && gJumpDone && gDodged) Finish();
+    if (!gBankDone && gBankCar != INVALID_VEHICLE_ID) {
+        GetVehiclePos(gBankCar, x, y, z);
+        if (x > gBankMaxX) gBankMaxX = x;
+        // Over the drain's floor (past the bank's foot) and well over it, not falling.
+        if (y > DRAIN_Y && z > YZ - 8.0 + ride + 2.0
+            && !(Nav_GetChaseInfo(gBanker, d, mode) && mode == NAV_CHASE_AIRBORNE)) {
+            if (!gBankFloated) printf("[dnav-test] banker floating at %.1f %.1f %.1f", x, y, z);
+            gBankFloated = true;
+        }
+        if (VectorSize(x - YX, y - (DRAIN_Y + 15.0), 0.0) < 10.0 && z < YZ - 8.0 + 3.0) {
+            printf("[dnav-test] banker reached its quarry after %d ms: car at %.1f %.1f %.1f", GetTickCount() - gBankStart, x, y, z);
+            gBankDone = true;
+            Nav_Stop(gBanker);
+        }
+    }
+
+    if (gWallDone && gJumpDone && gDodged && gBankDone) Finish();
 }
 
 forward TimedOut();

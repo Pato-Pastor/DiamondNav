@@ -43,8 +43,9 @@ public:
     // car could stand on.
     bool ground(float x, float y, float z, float up, float down, float& out) const;
 
-    // A face whose normal points up at least this much is ground (about 50 degrees).
-    static constexpr float GROUND_NZ = 0.65f;
+    // A face whose normal points up at least this much is ground a car drives on, up
+    // to about 63 degrees (a storm drain's banks, a steep ramp); steeper is a wall.
+    static constexpr float GROUND_NZ = 0.45f;
 
 private:
     bool cast(const Vec3& a, const Vec3& b, RayHit& hit, int want) const;

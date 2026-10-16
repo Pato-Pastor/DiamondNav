@@ -134,7 +134,14 @@ constexpr float COL_UP = 2.0f;              // m: the ground under a point is lo
 constexpr float COL_DOWN = 6.0f;            // ...to this far below
 constexpr float FALL_REACH = 120.0f;        // m: how far down a falling car looks for what it lands on
 constexpr float STEP_UP = 0.5f;             // m: the most a car's wheels climb at once (a kerb, not a railing)
-constexpr float GROUND_RISE = 1.2f;         // m: a straight run's ground climbs or falls no more than this per sample
+constexpr float GROUND_RISE = 1.2f;         // m: a run-up's ground climbs or falls no more than this per sample
+constexpr float CLIMB_RISE = 2.0f;          // m: a straight run climbs no more than this per sample (27 degrees);
+                                            // going down, any slope or drop, as far as CHASE_DROP_DZ in all
+constexpr float FALL_STEP = 1.5f;           // m: the ground this much lower just past its middle: the car is off
+                                            // an edge, and falls
+constexpr float CATCHUP_FROM = 40.0f;       // m: a chaser further than this behind a moving target...
+constexpr float CATCHUP_FULL = 160.0f;      // ...gets more and more extra speed up to this far,
+constexpr float CATCHUP_MAX = 0.35f;        // ...this share of its top speed and acceleration at most
 
 // OnNavMoveEnd's reasons (DiamondNav.inc).
 enum MoveEnd : int {
@@ -175,6 +182,7 @@ struct Mover {
     std::vector<uint8_t> junctions;
     std::vector<float> limits, cum;
     dnav::Handling car;                 // the car's handling, read when the path is set
+    float boost = 1.0f;                 // a chaser's catch-up: its top speed and acceleration times this
     dnav::DriveStyle style = dnav::DriveStyle::Normal;
     float wantSpeed = 0.0f;             // the speed it is going for (Nav_GetDriveInfo)
     size_t next = 0;
@@ -708,6 +716,22 @@ public:
 
     static dnav::Vec3 v3(const Vector3& v) { return dnav::Vec3 { v.x, v.y, v.z }; }
 
+    // With the world's collision: whether the ground just past a car's middle is a
+    // fall below the ground under it (it is going over an edge), not a slope it drives.
+    bool offEdge(const Mover& m, const Vector3& pos, float headingRad) const
+    {
+        float here, there;
+        if (!world_.ground(pos.x, pos.y, pos.z - m.carZ, COL_UP, COL_DOWN, here)) return false;
+        // Two probes a metre apart, so a seam between two faces is not taken for a drop.
+        const Vector2 fwd(-std::sin(headingRad), std::cos(headingRad));
+        for (float d : { NOSE_COL, NOSE_COL + 1.0f }) {
+            const Vector2 p = Vector2(pos) + fwd * d;
+            // (Nothing under it at all, the sea or the map's end, is no edge to fall off.)
+            if (!world_.ground(p.x, p.y, here, 0.5f, FALL_REACH, there) || here - there <= FALL_STEP) return false;
+        }
+        return true;
+    }
+
     // With the world's collision: when a car on a course first meets a wall (seconds
     // from now, or -1). Its box's front corners and middle sweep along at bumper
     // height over the ground it stands on, turning as firstHit's do.
@@ -754,7 +778,11 @@ public:
 
     // With the world's collision: whether a car can drive straight from one point on
     // the ground to another: nothing in the way of its sides or middle at bumper
-    // height, and ground all along that never climbs or drops more than a road does.
+    // height, and ground all along that never climbs more than a car can. Going down,
+    // any slope (a storm drain's bank) or drop (a ledge) will do: the car drives or
+    // falls down it, as far as CHASE_DROP_DZ in all. The rays follow the ground from
+    // sample to sample; where it falls away, they run on level at the top (a railing
+    // there stops it) and the car falls past the rest.
     bool runClear(const Shape& me, const Vector3& fromGround, const Vector3& toGround) const
     {
         const Vector2 a(fromGround), b(toGround);
@@ -762,20 +790,36 @@ public:
         if (len < 0.5f) return true;
         const Vector2 f = (b - a) / len, r(f.y, -f.x);
         dnav::RayHit hit;
-        for (float side : { -1.0f, 0.0f, 1.0f }) {
-            const Vector2 o = r * ((me.hw + WALL_SIDE) * side);
-            // The rays follow the ground's slope: start and end each at bumper height.
-            if (world_.wall({ a.x + o.x, a.y + o.y, fromGround.z + BUMPER }, { b.x + o.x, b.y + o.y, toGround.z + BUMPER }, hit))
-                return false;
-        }
+        auto segment = [&](const Vector2& p, float pz, const Vector2& q, float qz) {
+            for (float side : { -1.0f, 0.0f, 1.0f }) {
+                const Vector2 o = r * ((me.hw + WALL_SIDE) * side);
+                if (world_.wall({ p.x + o.x, p.y + o.y, pz + BUMPER }, { q.x + o.x, q.y + o.y, qz + BUMPER }, hit))
+                    return false;
+            }
+            return true;
+        };
+        Vector2 last = a;
         float level = fromGround.z;
-        for (float d = CHASE_GROUND_STEP; d < len; d += CHASE_GROUND_STEP) {
-            const Vector2 p = a + f * d;
+        for (float d = CHASE_GROUND_STEP;; d += CHASE_GROUND_STEP) {
+            const bool end = d >= len;
+            const Vector2 p = end ? b : a + f * d;
             float gz;
-            if (!deckUnder(p.x, p.y, level, gz) || std::fabs(gz - level) > GROUND_RISE) return false;
+            if (!world_.ground(p.x, p.y, level, COL_UP, CHASE_DROP_DZ, gz) && !deckUnder(p.x, p.y, level, gz)) {
+                if (!end) return false;
+                gz = toGround.z;
+            }
+            // At the end, the first ground under the run is the target's (not a deck
+            // over it).
+            if (end && std::fabs(gz - toGround.z) >= CHASE_DIRECT_DZ) return false;
+            if (gz - level > CLIMB_RISE * std::max(1.0f, glm::distance(last, p) / CHASE_GROUND_STEP)) return false;
+            if (fromGround.z - gz > CHASE_DROP_DZ) return false;
+            // Falling away: level at the top, then down.
+            if (!segment(last, level, p, level - gz > GROUND_RISE ? level : gz)) return false;
+            if (end) break;
+            last = p;
             level = gz;
         }
-        return std::fabs(level - toGround.z) < CHASE_DIRECT_DZ;
+        return true;
     }
 
     // Driving straight from car toward target on the car's own level: how far it goes
@@ -1129,6 +1173,12 @@ public:
     void planSpeeds(Mover& m, IVehicle& car)
     {
         m.car = drivingModel.handling(car.getModel());
+        if (m.boost > 1.0f) {
+            // Catching up (as the game's police do): a faster engine, the same grip.
+            m.car.top *= m.boost;
+            for (float& a : m.car.accel) a *= m.boost;
+            for (float& a : m.car.accelOff) a *= m.boost;
+        }
         std::vector<dnav::Point> pts;
         pts.reserve(m.points.size());
         for (const auto& p : m.points) pts.push_back(dnav::Point { p.x, p.y, p.z });
@@ -1392,6 +1442,14 @@ public:
                 return;
             }
             aheadZ = deckUnder(ahead.x, ahead.y, pos.z - m.carZ, gz) ? gz + m.carZ : pos.z;
+        } else if (m.chase && world_.loaded() && !m.reversing && m.v > 2.0f && offEdge(m, pos, h)) {
+            // Chasing, it went over an edge (a ledge, a bank's lip at speed) on its way:
+            // it falls, as a car would, instead of floating on at the height it was.
+            m.dropZ = pos.z - m.carZ - FALL_REACH;
+            m.airborne = true;
+            m.vz = 0.0f;
+            fly(npcid, m, *npc, pos, dt);
+            return;
         } else if (world_.loaded() && world_.ground(ahead.x, ahead.y, aheadZ - m.carZ, COL_UP, COL_DOWN, gz))
             aheadZ = gz + m.carZ;     // the ground itself, wherever the car is going
         else if (m.ground && finder.groundAt(ahead.x, ahead.y, aheadZ - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
@@ -1553,6 +1611,17 @@ public:
         const float tspeed = glm::length(Vector2(tvel)) * VELOCITY_UNIT;
         m.quarryDist = glm::distance(tpos, cpos);
         m.match = tspeed;
+        // Fallen behind a target that is getting away: extra speed to catch up, more the
+        // further behind, as the game gives its police. Its speed plan follows.
+        {
+            const float boost = tspeed > CHASE_STILL
+                ? 1.0f + CATCHUP_MAX * std::clamp((dist - CATCHUP_FROM) / (CATCHUP_FULL - CATCHUP_FROM), 0.0f, 1.0f)
+                : 1.0f;
+            if (std::fabs(boost - m.boost) > 0.02f) {
+                m.boost = boost;
+                if (!m.points.empty()) planSpeeds(m, *car);
+            }
+        }
         // Held up by a vehicle in the way (another chaser beside it) near it is as good.
         const float close = m.blocked > 0.3f ? CHASE_CLOSE * 2.0f : CHASE_CLOSE;
         if (dist < close && std::fabs(tpos.z - cpos.z) < CHASE_DIRECT_DZ && tspeed < CHASE_STILL && !ram) {
@@ -1578,7 +1647,11 @@ public:
         const Vector3 cground(carGround.x, carGround.y, carGround.z);
         // Straight at it when nothing is in the way: the world's collision says so best,
         // else the car mesh, else the roads' decks.
-        bool straight = std::fabs(tpos.z - cpos.z) < CHASE_DIRECT_DZ && m.wallHold <= 0.0f
+        // (With the collision, a target below is driven at straight too, down a bank or
+        // off a ledge, when nothing is in the way: runClear checks the way down.)
+        const float below = cpos.z - tpos.z;
+        bool straight = (std::fabs(below) < CHASE_DIRECT_DZ || (walls && below > 0.0f && below <= CHASE_DROP_DZ))
+            && m.wallHold <= 0.0f
             && (walls ? dist < CHASE_DIRECT && runClear(me, cground, tground)
                 : carMesh ? dist < CHASE_DIRECT && finder.lineClear(carGround, targetGround, dnav::MeshKind::Car)
                         : dist < CHASE_BLIND || (dist < CHASE_DECKS
@@ -1587,7 +1660,6 @@ public:
         if (!carMesh && !roads && !walls) straight = true;
         // A target below, past the edge of the deck the car is on (it dropped off a
         // bridge, a ledge): straight at it and off the edge, not the roads round.
-        const float below = cpos.z - tpos.z;
         std::vector<Vector3> way;
         const bool drop = !straight && !(m.chaseFlags & CHASE_NO_DROP) && dist < CHASE_DROP && below >= CHASE_DIRECT_DZ && below <= CHASE_DROP_DZ
             && dropWay(me, carGround, tpos, way);
