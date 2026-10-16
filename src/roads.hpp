@@ -65,6 +65,12 @@ struct RoutePoint {
 struct RouteOptions {
     bool emergency = false;     // may use emergency-only roads
     bool boats = false;         // a boat: water routes only
+    // A pursuit: any road either way (against a one-way street's traffic costs a
+    // little more), and, with a heading, a start ahead of the car before one behind
+    // it (turning round costs about a U-turn's distance).
+    bool anyWay = false;
+    bool hasHeading = false;
+    float heading = 0.0f;       // GTA's, degrees (0 north, turning left)
 };
 
 enum class RouteStatus : int {
@@ -82,6 +88,8 @@ public:
     static constexpr float MAX_CORNER = 12.0f;
     static constexpr float SEARCH_REACH = 60.0f;
     static constexpr float EDGE_REACH = 400.0f;    // ...or a stretch of road starting this near
+    static constexpr float AGAINST_COST = 1.3f;    // anyWay: a stretch against the traffic costs this much more
+    static constexpr float TURN_ROUND = 35.0f;     // m: a start behind the car costs this much more
 
     bool load(const std::string& path, std::string& error);
     bool loaded() const { return !nodes_.empty(); }
@@ -111,6 +119,7 @@ public:
 private:
     bool usable(const RoadNode& n, const RouteOptions& opt) const;
     bool hasExit(uint32_t node, const RouteOptions& opt) const;
+    static bool drivable(const RoadEdge& e, const RouteOptions& opt) { return e.lanes || (opt.anyWay && e.lanesBack); }
     bool hasEntry(uint32_t node, const RouteOptions& opt) const;
     const RoadEdge* edge(uint32_t from, uint32_t to) const;
     float laneOffset(const RoadEdge& e) const;

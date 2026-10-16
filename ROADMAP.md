@@ -71,6 +71,12 @@ native (or a few) that a script calls on an NPC it already made.
   swerves round or stops for vehicles in its way by their collision boxes
   (vehicles.dnv version 4 adds where each box sits). Road routes start and end
   along long stretches of road, not only near a node.
+- 1.3.4: chases know the map. `navmesh/world.col` (the bake's world.tris) is loaded
+  for rays: chasers check walls and the ground before a straight run, swerve round
+  walls and objects, find a railing's gap and line up square to it, and fall without
+  passing through anything. Pursuit routes start wherever the car can join the road
+  (turning round if that is shorter) and may go against one-way traffic, and the
+  chaser aims at the target's smoothed heading so it stops braking for every swerve.
 
 ## 1.4: traffic
 

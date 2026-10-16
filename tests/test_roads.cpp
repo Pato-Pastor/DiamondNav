@@ -115,6 +115,24 @@ int main()
         CHECK(std::fabs(pts.front().y - 300.0f - RoadGraph::LANE_WIDTH * 0.5f) < 0.01f);
     }
     CHECK(g.route(200, 300, 10, 0, 300, 10, car, pts) == RouteStatus::NoStart);
+    // A pursuit drives it the wrong way if it must.
+    RouteOptions pursuit;
+    pursuit.anyWay = true;
+    CHECK(g.route(200, 300, 10, 0, 300, 10, pursuit, pts) == RouteStatus::Ok);
+    if (pts.size() >= 2) CHECK(pts.front().x > pts.back().x);
+
+    // With a heading, a car halfway along the first leg going east starts on the road
+    // ahead of it (node 1, not node 0 behind it, though both are as near) and so heads
+    // east to a target to the east, not back to node 0 first.
+    RouteOptions east = pursuit;
+    east.hasHeading = true;
+    east.heading = -90.0f;      // GTA: 0 north, 90 west, -90 east
+    CHECK(g.route(50, 0, 10, 200, 100, 10, east, pts) == RouteStatus::Ok);
+    if (!pts.empty()) {
+        bool backward = false;
+        for (const auto& p : pts) backward = backward || p.x < 45.0f;
+        CHECK(!backward);
+    }
 
     // Not connected to the L.
     CHECK(g.route(0, 0, 10, 200, 300, 10, car, pts) == RouteStatus::NoPath);

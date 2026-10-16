@@ -15,7 +15,10 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 - **Chasing:** an NPC driver chases a player along the roads, and off them across a
   car-sized navmesh when the player leaves the road; close in, it drives straight
   at them when nothing is in the way, keeps up alongside a car that is getting
-  away, and follows a player off a bridge or a ledge. Several chasers come up either
+  away, and follows a player off a bridge or a ledge, through a gap in its railing.
+  With the world's collision loaded they see every wall and object (yours too) and
+  never drive or fall through one, and a pursuit takes the shortest way, turning
+  round or going the wrong way down a one-way street. Several chasers come up either
   side of their target. Drivers steer like cars: they curve into corners, brake for
   them, and back up to turn round in tight spots.
 - **Traffic sense:** every driver swerves round, or brakes behind, the vehicles in
@@ -68,7 +71,8 @@ loaded:
 [nav] loaded roads.dnr: <nodes> road nodes, <links> links
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
-[nav] DiamondNav 1.3.3: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] loaded world.col: <faces> faces
+[nav] DiamondNav 1.3.4: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -130,7 +134,16 @@ again for a car:
 navtools/navbake bake/world.tris navmesh/world_car.nav --agent car --water bake/world.water.txt
 ```
 
-(`dnav.py world` prints both lines with the files it wrote.) `--area "X0 Y0 X1 Y1"` on `dnav.py world` bakes part of it, which is
+For chases, copy the world's collision itself into `navmesh/` too. Drivers cast
+rays against it to see walls, railings, posts and your objects, and to find the
+ground under a car that falls; without it they only know what the car navmesh
+says:
+
+```sh
+cp bake/world.tris navmesh/world.col
+```
+
+(`dnav.py world` prints these lines with the files it wrote.) `--area "X0 Y0 X1 Y1"` on `dnav.py world` bakes part of it, which is
 quicker for trying things out. A `--routes` file makes navbake check that paths
 exist (each line `name<TAB>x y z<TAB>x y z`) and fail if one doesn't.
 
@@ -247,12 +260,21 @@ player (or another NPC) until `Nav_Stop`. It follows the roads while the target 
 on one, the car navmesh once it leaves them, and drives straight at where the
 target is going (as far ahead as the car takes to get there) when it is close and
 nothing is in the way: `Nav_IsLineClear` on the car navmesh, or, without one, a
-line that runs over road all the way (up to 150 m) or a very short one. It keeps
+line that runs over road all the way (up to 150 m) or a very short one. With
+`world.col` loaded that line must also clear every wall at bumper height and keep
+to the ground, and a wall that blocks a straight run sends it to the roads for a
+moment. Its road routes are a pursuit's: from wherever the car can get on the road,
+turning round if that is shorter (it costs about 35 m), and the wrong way down a
+one-way road at a small cost. It aims at where the target is heading on average,
+not where it points this instant, so a target swerving about does not make it
+brake. It keeps
 up with a target that is moving, pulling up alongside on its left, stops beside
 one that stands still, and re-plans as the target moves without pausing. A target
 that drops off a bridge or a ledge (up to 30 m down, within 60 m) is followed off
 the edge: the car drives to it on its own level and falls, keeping its speed, to
-the road below (`NAV_CHASE_NO_DROP` takes the roads round instead). Several NPCs
+the road below. With `world.col` it finds where the edge is, lines up square to it
+and goes through a gap in the railing (the nearest within 12 m), stops falling
+forward when it meets a wall, and lands on whatever is under it (`NAV_CHASE_NO_DROP` takes the roads round instead). Several NPCs
 after one target come up either side of it instead of in a line;
 `NAV_CHASE_RAM` drives into it without slowing. `Nav_GetChaseInfo(npcid, distance,
 mode)` says how far the target is and what the chaser is doing (beside it,
@@ -264,7 +286,7 @@ cornering on the limit of the car's grip and braking as hard as it can.
 **Lines.** `Nav_IsLineClear(x1, y1, z1, x2, y2, z2, kind)` says whether a ped
 (`NAV_MESH_PED`) or a car (`NAV_MESH_CAR`) can go straight between two points on the
 ground: no wall, drop or obstacle. It follows the ground, so it is not an eye-level
-line of sight; that needs the full collision mesh (ColAndreas).
+line of sight; drivers use the world's collision (`world.col`) for that.
 
 **Or take the points.** `Nav_RequestPath` (walking) and `Nav_RequestRoute`
 (driving) return a request id; `OnNavPathResult(requestid, status, points)` follows

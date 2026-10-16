@@ -106,7 +106,7 @@ bool RoadGraph::hasExit(uint32_t node, const RouteOptions& opt) const
 {
     const RoadNode& n = nodes_[node];
     for (uint32_t i = n.firstEdge; i < n.firstEdge + n.edgeCount; i++)
-        if (edges_[i].lanes && usable(nodes_[edges_[i].to], opt)) return true;
+        if (drivable(edges_[i], opt) && usable(nodes_[edges_[i].to], opt)) return true;
     return false;
 }
 
@@ -114,7 +114,7 @@ bool RoadGraph::hasEntry(uint32_t node, const RouteOptions& opt) const
 {
     const RoadNode& n = nodes_[node];
     for (uint32_t i = n.firstEdge; i < n.firstEdge + n.edgeCount; i++)
-        if (edges_[i].lanesBack && usable(nodes_[edges_[i].to], opt)) return true;
+        if ((edges_[i].lanesBack || (opt.anyWay && edges_[i].lanes)) && usable(nodes_[edges_[i].to], opt)) return true;
     return false;
 }
 
@@ -276,7 +276,7 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
                     for (uint32_t k = a.firstEdge; k < a.firstEdge + a.edgeCount; k++) {
                         // A stretch that may be driven from this node on, with the point
                         // along it (not past its far end: a one-way street's end is not on it).
-                        if (!edges_[k].lanes || !usable(nodes_[edges_[k].to], opt)) continue;
+                        if (!drivable(edges_[k], opt) || !usable(nodes_[edges_[k].to], opt)) continue;
                         const RoadNode& b = nodes_[edges_[k].to];
                         const float ex = b.x - a.x, ey = b.y - a.y, len2 = ex * ex + ey * ey;
                         if (len2 < 1e-6f) continue;
@@ -293,8 +293,34 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
             }
         return best;
     };
-    const int s = pick(fx, fy, fz, true);
-    if (s < 0) return RouteStatus::NoStart;
+    // With a heading, every node near the start is a way in, each costing the way to
+    // it plus a turn round if it is behind the car: a car going one way takes the
+    // road ahead of it, not the nearest node at its back.
+    std::vector<std::pair<uint32_t, float>> starts;
+    if (opt.hasHeading) {
+        const float h = opt.heading * 0.01745329f;
+        const float fwdX = -std::sin(h), fwdY = std::cos(h);
+        const int r = static_cast<int>(std::ceil(SEARCH_REACH / CELL));
+        const int cx = cellOf(fx), cy = cellOf(fy);
+        for (int dx = -r; dx <= r; dx++)
+            for (int dy = -r; dy <= r; dy++) {
+                auto it = cells_.find(cellKey(cx + dx, cy + dy));
+                if (it == cells_.end()) continue;
+                for (uint32_t i : it->second) {
+                    const RoadNode& n = nodes_[i];
+                    if (!usable(n, opt) || !hasExit(i, opt) || std::fabs(n.z - fz) > 6.0f) continue;
+                    const float ox = n.x - fx, oy = n.y - fy, d = len2d(ox, oy);
+                    if (d > SEARCH_REACH) continue;
+                    const bool behind = d > 6.0f && ox * fwdX + oy * fwdY < 0.0f;
+                    starts.push_back({ i, d + (behind ? TURN_ROUND : 0.0f) });
+                }
+            }
+    }
+    if (starts.empty()) {
+        const int s = pick(fx, fy, fz, true);
+        if (s < 0) return RouteStatus::NoStart;
+        starts.push_back({ static_cast<uint32_t>(s), 0.0f });
+    }
     const int g = pick(tx, ty, tz, false);
     if (g < 0) return RouteStatus::NoEnd;
 
@@ -310,8 +336,11 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         const RoadNode& a = nodes_[i];
         return std::sqrt((a.x - goal.x) * (a.x - goal.x) + (a.y - goal.y) * (a.y - goal.y) + (a.z - goal.z) * (a.z - goal.z));
     };
-    cost[s] = 0.0f;
-    open.push({ h(s), static_cast<uint32_t>(s) });
+    for (const auto& [s, c] : starts) {
+        if (c >= cost[s]) continue;
+        cost[s] = c;
+        open.push({ c + h(s), s });
+    }
     while (!open.empty()) {
         const uint32_t cur = open.top().second;
         open.pop();
@@ -321,9 +350,10 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         const RoadNode& a = nodes_[cur];
         for (uint32_t i = a.firstEdge; i < a.firstEdge + a.edgeCount; i++) {
             const RoadEdge& e = edges_[i];
-            if (!e.lanes || closed[e.to] || !usable(nodes_[e.to], opt)) continue;
+            if (!drivable(e, opt) || closed[e.to] || !usable(nodes_[e.to], opt)) continue;
             const RoadNode& b = nodes_[e.to];
-            const float c = cost[cur] + std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
+            const float c = cost[cur] + (e.lanes ? 1.0f : AGAINST_COST)
+                * std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
             if (c < cost[e.to]) {
                 cost[e.to] = c;
                 prev[e.to] = static_cast<int>(cur);
@@ -331,7 +361,7 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
             }
         }
     }
-    if (prev[g] < 0 && s != g) return RouteStatus::NoPath;
+    if (!std::isfinite(cost[g])) return RouteStatus::NoPath;
 
     std::vector<uint32_t> chain;
     for (int i = g; i >= 0; i = prev[i]) chain.push_back(static_cast<uint32_t>(i));
@@ -346,7 +376,7 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         float bestOff = SEARCH_REACH;
         for (uint32_t i = e.firstEdge; i < e.firstEdge + e.edgeCount; i++) {
             const RoadEdge& ed = edges_[i];
-            if (!ed.lanes || !usable(nodes_[ed.to], opt)) continue;
+            if (!drivable(ed, opt) || !usable(nodes_[ed.to], opt)) continue;
             if (chain.size() >= 2 && ed.to == chain[chain.size() - 2]) continue;
             const RoadNode& b = nodes_[ed.to];
             const float dx = b.x - e.x, dy = b.y - e.y, len = len2d(dx, dy);
