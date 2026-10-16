@@ -40,7 +40,7 @@ public OnNavMoveEnd(npcid, reason)
 ```
 
 Licensed under the [Mozilla Public License 2.0](LICENSE). Works with open.mp
-v1.5.8.3079 (the 32-bit server, Linux or Windows).
+v1.6.7.3218 (the 32-bit server, Linux or Windows).
 
 ## Install
 
@@ -63,7 +63,7 @@ loaded:
 [nav] loaded roads.dnr: <nodes> road nodes, <links> links
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
-[nav] DiamondNav 1.3.0: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.1: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -247,7 +247,7 @@ Road flags: `NAV_ROAD_EMERGENCY` lets a route use emergency-only roads;
 ## The improved NPC component
 
 `extras/NPCs.so` (`NPCs.dll`) is open.mp's own NPC component, built from the
-v1.5.8.3079 source with [our patch](npcs/patches) applied. Copy it over
+v1.6.7.3218 source with [our patch](npcs/patches) applied. Copy it over
 `components/NPCs.so`. Everything else in open.mp stays stock, and DiamondNav works
 without it. What it changes:
 
@@ -256,9 +256,9 @@ without it. What it changes:
   minigun); drivers fire the Uzi, MP5 and Tec-9 sideways, as in GTA.
 - **Passengers ride along**: their position follows the car (stock left them where
   they got in).
-- **Driving looks right**: the car's speed is sent in the units the game expects
-  (stock sent it 20 times too small, so cars crawled and jumped for players), cars
-  pitch along slopes, and the front wheels steer into turns.
+- **Driving looks right**: the front wheels steer into turns, straighten when the
+  car stops, and the car never rolls. (Sending the car's speed in the game's units
+  and pitching it along slopes were ours until open.mp 1.6.7 did both itself.)
 - **Cars back up**: an `NPC_Move` drive with a negative speed reverses away from its
   target. DiamondNav uses it for three-point turns, and for a target just behind the
   car; with the stock component it notices, says so once in the log, and turns

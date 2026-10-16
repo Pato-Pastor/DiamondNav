@@ -38,8 +38,8 @@ jobs:
 
       - name: Live server test
         run: |
-          curl -fsSL -o omp.tar.gz https://github.com/openmultiplayer/open.mp/releases/download/v1.5.8.3079/open.mp-linux-x86-dynssl.tar.gz
-          echo "2be12550e3aaff0e60510ae8823e18b9759990eca3f02c101a49bcb3c985d222  omp.tar.gz" | sha256sum -c
+          curl -fsSL -o omp.tar.gz https://github.com/openmultiplayer/open.mp/releases/download/v1.6.7.3218/open.mp-linux-x86-dynssl.tar.gz
+          echo "4d963e0fa24938eae166d27205ef1858b71a74ec3bb71eb41a3a7ca65e93d8d8  omp.tar.gz" | sha256sum -c
           mkdir omp && tar -xzf omp.tar.gz -C omp --strip-components=1
           python3 tests/server/run.py omp build --npcs build/npcs/NPCs.so
 

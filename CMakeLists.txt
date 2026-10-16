@@ -13,11 +13,11 @@
 #             cmake --build build --config Release
 #
 # Dependencies are pinned here and fetched by CMake: the open.mp SDK, pawn-natives
-# and the Pawn headers at the commits open.mp v1.5.8.3079 itself pins
+# and the Pawn headers at the commits open.mp v1.6.7.3218 itself pins
 # and Recast/Detour v1.6.0.
 
 cmake_minimum_required(VERSION 3.19)
-project(DiamondNav LANGUAGES C CXX VERSION 1.3.0)
+project(DiamondNav LANGUAGES C CXX VERSION 1.3.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,7 +32,7 @@ set(FETCHCONTENT_QUIET ON)
 # SOURCE_SUBDIR "-" (no CMakeLists there): fetch only, we compile what we need.
 FetchContent_Declare(ompsdk
     GIT_REPOSITORY https://github.com/openmultiplayer/open.mp-sdk
-    GIT_TAG efc11219c587dd1af791130bb937152051c05bda)
+    GIT_TAG 08cc69a32d96c0eb8fe063d26c78259e54ca853f)
 FetchContent_Declare(pawnnatives
     GIT_REPOSITORY https://github.com/openmultiplayer/pawn-natives
     GIT_TAG 68f34b4dffdf5568e56437f8fdeec9408361373f
@@ -40,7 +40,7 @@ FetchContent_Declare(pawnnatives
     SOURCE_SUBDIR -)
 FetchContent_Declare(pawnamx
     GIT_REPOSITORY https://github.com/openmultiplayer/compiler
-    GIT_TAG 56315596dce01a1461995cb506fd3df72ab2c8ee
+    GIT_TAG 5904ab8eac2a24706f303422cf1c307b319f76f0
     GIT_SUBMODULES ""
     SOURCE_SUBDIR -)
 FetchContent_Declare(recast

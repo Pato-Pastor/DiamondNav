@@ -10,7 +10,7 @@ DiamondNav-<version>-<platform>/
   navmesh/                          where the baked files go (empty)
   navtools/                         navbake, navquery, dnav.py and its library
   extras/NPCs.so|.dll               open.mp's NPC component with our driving and
-                                    drive-by patches (optional; open.mp v1.5.8.3079)
+                                    drive-by patches (optional; open.mp v1.6.7.3218)
   README.md, LICENSE
 """
 

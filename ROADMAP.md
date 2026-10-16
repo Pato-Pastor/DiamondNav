@@ -58,6 +58,8 @@ native (or a few) that a script calls on an NPC it already made.
 - Drivers pull away by that table, brake and corner on dirt by the dirt numbers, and
   ease into turns by the turn mass.
 - `Nav_GetVehicleInfo`, `Nav_GetVehicleAccel`, `Nav_GetVehicleAccelTime`.
+- 1.3.1: built for open.mp 1.6.7 (its SDK, and the NPC patch rebased onto it; open.mp
+  now sends a driving NPC's speed in the game's units and pitches the car itself).
 
 ## 1.4: traffic
 

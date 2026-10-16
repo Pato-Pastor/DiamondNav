@@ -27,10 +27,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(OMP_TAG v1.5.8.3079)
+set(OMP_TAG v1.6.7.3218)
 set(OMP_VERSION_MAJOR 1)
-set(OMP_VERSION_MINOR 5)
-set(OMP_VERSION_PATCH 8)
+set(OMP_VERSION_MINOR 6)
+set(OMP_VERSION_PATCH 7)
 
 find_package(Git REQUIRED)
 include(FetchContent)
@@ -50,10 +50,10 @@ FetchContent_Declare(omp
     GIT_SUBMODULES ""
     SOURCE_SUBDIR -
     ${NPC_PATCH_COMMAND})
-# The submodules at the commits open.mp v1.5.8.3079 pins.
+# The submodules at the commits open.mp v1.6.7.3218 pins.
 FetchContent_Declare(ompsdk
     GIT_REPOSITORY https://github.com/openmultiplayer/open.mp-sdk
-    GIT_TAG efc11219c587dd1af791130bb937152051c05bda)
+    GIT_TAG 08cc69a32d96c0eb8fe063d26c78259e54ca853f)
 FetchContent_Declare(ompnetwork
     GIT_REPOSITORY https://github.com/openmultiplayer/open.mp-network
     GIT_TAG dc3eac9d5dc30f96edcf4e7e64f33d8c241d49ff
