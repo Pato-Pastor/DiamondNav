@@ -63,12 +63,21 @@ native (or a few) that a script calls on an NPC it already made.
 - 1.3.2: each car sits at its own height over the road (vehicles.dnv version 3, from
   its wheels and springs; `carZ` 0.0 by default), and cars off a road route keep to
   the ground (car mesh, walking mesh or the road surface) instead of floating.
+- 1.3.3: chases. A chaser follows its target off a bridge or a ledge (falling to the
+  road below), keeps up alongside a moving target instead of stopping, leads it by
+  the time it takes to get there, drives straight along a road up to 150 m without
+  a car navmesh, and spreads out with other chasers; `NAV_CHASE_RAM`,
+  `NAV_CHASE_NO_DROP`, `Nav_GetChaseInfo`; pursuit brakes flat out. Every driver
+  swerves round or stops for vehicles in its way by their collision boxes
+  (vehicles.dnv version 4 adds where each box sits). Road routes start and end
+  along long stretches of road, not only near a node.
 
 ## 1.4: traffic
 
 - **`Nav_Cruise(npcid, speed, flags)`**: a driver drives around the road network on
   its own, picking turns at random (or towards an area), in its lane.
-  - Keeps a gap to the vehicle in front: other DiamondNav cars and players' cars.
+  - Keeps a gap to the vehicle in front: other DiamondNav cars and players' cars
+    (1.3.3's avoidance already swerves round or stops for them; traffic adds lanes).
   - Slows into junctions and gives way to a car already in the junction.
   - Ends only on `Nav_Stop`, or when the NPC leaves the car.
 - `Nav_DriveTo` gets the same spacing and junction behaviour.

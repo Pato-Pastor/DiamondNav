@@ -34,6 +34,7 @@ struct Handling {
     float reverse = 12.0f;      // top speed backing up, m/s
     float length = 4.5f, width = 1.9f, height = 1.5f, wheelbase = 2.6f;    // m
     float ride = 0.0f;          // its centre over the road, m (0: not known, see rideHeight)
+    float boxX = 0.0f, boxY = 0.0f; // the middle of its collision box (length by width) from its centre: right, front
     // Full-throttle acceleration (m/s^2) at top * i / (ACCEL_POINTS - 1): the gears,
     // the engine, the air and how much of it the tyres put down, on a road and on dirt.
     std::array<float, ACCEL_POINTS> accel {}, accelOff {};
@@ -58,7 +59,7 @@ enum class DriveStyle : int {
     Cautious = 0,               // well under the limits, gentle corners, early braking
     Normal = 1,                 // the limits, comfortable corners
     Fast = 2,                   // a quarter over the limits, brisk corners, late braking
-    Pursuit = 3,                // no limits: as fast as the car and the corners allow
+    Pursuit = 3,                // no limits: flat out, cornering and braking on the limit of the car
     Count = 4,
 };
 
@@ -85,6 +86,12 @@ public:
 
     // A model's handling: set by the script, from vehicles.dnv, or the default.
     Handling handling(int model) const;
+    // vehicles.dnv's own row for a model (its size from its DFF), or null.
+    const Handling* fromFile(int model) const
+    {
+        auto v = vehicles_.find(model);
+        return v != vehicles_.end() ? &v->second : nullptr;
+    }
     void setHandling(int model, const Handling& h) { overrides_[model] = h; }
 
     // Speed limits by road class, m/s.

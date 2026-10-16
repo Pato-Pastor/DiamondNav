@@ -80,13 +80,40 @@ constexpr auto CHASE_NO_OFFROAD = std::chrono::seconds(4);     // after the car 
 constexpr float CHASE_CLOSE = 6.0f;         // this near, the car stops beside its target
 constexpr float CHASE_DIRECT = 60.0f;       // within this, a clear straight line is driven straight
 constexpr float CHASE_BLIND = 25.0f;        // ...or, with no car mesh to check the line, within this
+constexpr float CHASE_DECKS = 150.0f;       // ...or within this, where the line runs over road all the way
+constexpr float CHASE_DECK_SLACK = 8.0f;    // ...but for this last bit (the target stands beside the road)
+constexpr float CHASE_DECK_RISE = 1.0f;     // m a line over road may climb or fall per sample
 constexpr float CHASE_DIRECT_DZ = 4.0f;     // no straight line up or down a level
 constexpr float CHASE_REPLAN = 10.0f;       // re-plan once the target is this far from the plan's end
 constexpr float CHASE_REPLAN_SHARE = 0.2f;  // ...or a fifth of the way to it, if more
 constexpr float CHASE_ON_ROAD = 15.0f;      // a target this near a road node is on the road
-constexpr float CHASE_LEAD = 25.0f;         // aims where the target will be in 0.5 s (velocity is ~50 m/s per unit)
+constexpr float VELOCITY_UNIT = 50.0f;      // m/s per unit of a player's velocity
+constexpr float CHASE_LEAD_MIN = 0.3f;      // s: aims where the target will be by the time it gets there,
+constexpr float CHASE_LEAD_MAX = 1.5f;      // ...looking this far ahead at least and at most
+constexpr float CHASE_STILL = 2.0f;         // m/s: a target slower than this is waited beside, not followed
+constexpr float CHASE_ALONGSIDE = 3.0f;     // m: a lone chaser keeps up with a moving target this far to its left
+constexpr float CHASE_SPREAD = 4.0f;        // m: several chasers aim this far apart, either side of the target
 constexpr float CHASE_OFFROAD_RANGE = 200.0f; // with a car mesh, nearer than this the chase goes straight across it
 constexpr float CHASE_GROUND_STEP = 4.0f;   // a straight run samples the ground this often
+constexpr float CHASE_DROP = 60.0f;         // a target below and this near, past an edge: off it after them
+constexpr float CHASE_DROP_DZ = 30.0f;      // ...no further down than this
+constexpr float CHASE_EDGE_STEP = 2.0f;     // how often the way to an edge is sampled
+constexpr float GRAVITY = 9.81f;            // m/s^2, a car off an edge
+constexpr float FALL_MAX = 50.0f;           // m/s, the fastest it falls
+constexpr float AVOID_STEP = 0.1f;          // s: a driver's course is checked against every vehicle this often
+constexpr float AVOID_HORIZON_MIN = 1.5f;   // s: ...this far ahead at least,
+constexpr float AVOID_HORIZON_MAX = 4.0f;   // ...at most, and as long as it takes to stop plus a second
+constexpr float AVOID_CREEP = 3.0f;         // m/s: standing still, it checks the course it would pull away on
+constexpr float AVOID_SIDE = 0.25f;         // m: room it keeps either side of its own box
+constexpr float AVOID_FRONT = 0.6f;         // m: ...and ahead of it
+constexpr float AVOID_GAP = 1.5f;           // m: where it stops behind one it cannot get past
+constexpr float AVOID_LEVEL = 4.0f;         // m: a vehicle further up or down is on another level
+constexpr float AVOID_STICK = 2.0f;         // s: it keeps swerving to the same side this long after
+constexpr float AVOID_STUCK = 1.0f;         // s: stopped this long with no way past, it backs up
+constexpr float AVOID_BACK = 5.0f;          // m: ...this far, the nose swinging to the side it will pass on
+constexpr float AVOID_SWERVES[] = { 0.0f, 8.0f, 16.0f, 28.0f, 45.0f, 65.0f };   // degrees off its heading it tries
+constexpr float LANDED = 0.3f;              // m over the ground it falls to: down
+constexpr float NOSE = 2.0f;                // the car is off the edge once this far ahead of its centre is
 
 // OnNavMoveEnd's reasons (DiamondNav.inc).
 enum MoveEnd : int {
@@ -99,6 +126,12 @@ enum MoveEnd : int {
 
 // Nav_DriveTo's flags beyond the road ones (DiamondNav.inc).
 constexpr int DRIVE_OFFROAD = 4;
+// Nav_Chase's flags.
+constexpr int CHASE_RAM = 1;            // drive into the target: no slowing at the end, no spreading out
+constexpr int CHASE_NO_DROP = 2;        // never off an edge after it: the roads round instead
+// Nav_GetChaseInfo's modes.
+enum ChaseMode : int { CHASE_BESIDE = 0, CHASE_STRAIGHT = 1, CHASE_ROUTE = 2, CHASE_PLANNING = 3, CHASE_EDGE = 4,
+    CHASE_AIRBORNE = 5 };
 
 bool driving(dnav::PathKind k)
 {
@@ -150,6 +183,68 @@ struct Mover {
     TimePoint nextThink {}, planned {}, noOffRoadUntil {};
     bool direct = false;                // driving straight at the target
     bool idle = false;                  // stopped beside it
+    // A straight run off an edge after a target below (a bridge, a ledge): on the
+    // deck's level to its edge, then off it, falling to the first deck under it or
+    // the level the target is on.
+    bool drop = false;
+    float dropZ = 0.0f;                 // the target's ground
+    bool airborne = false;              // off the edge, falling
+    float vz = 0.0f;                    // m/s, up
+    int chaseFlags = 0;                 // Nav_Chase's flags (CHASE_RAM, CHASE_NO_DROP)
+    float match = 0.0f;                 // m/s: the target's speed, which a run ends at (a moving target)
+    float quarryDist = 0.0f;            // m: how far the target was at the last think (Nav_GetChaseInfo)
+    int quarryCar = -1;                 // the target's vehicle (a ram goes into it)
+    float avoidSide = 0.0f;             // the way it is swerving round a vehicle (1 left, -1 right)
+    float avoidFor = 0.0f;              // s it keeps to that side after the way is clear
+    float blocked = 0.0f;               // s stopped with no way past a vehicle
+    bool backOff = false;               // backing up to get round one
+};
+
+// A vehicle's footprint: its collision box from above.
+struct Box {
+    Vector2 c, f, r;                    // its middle, and its forward and right axes
+    float hw, hl;                       // half its width (along r) and length (along f)
+};
+
+// Whether two boxes overlap (separating axes: theirs).
+bool overlaps(const Box& a, const Box& b)
+{
+    const Vector2 d = b.c - a.c;
+    for (const Vector2& ax : { a.f, a.r, b.f, b.r }) {
+        const float ra = a.hw * std::fabs(glm::dot(a.r, ax)) + a.hl * std::fabs(glm::dot(a.f, ax));
+        const float rb = b.hw * std::fabs(glm::dot(b.r, ax)) + b.hl * std::fabs(glm::dot(b.f, ax));
+        if (std::fabs(glm::dot(d, ax)) > ra + rb) return false;
+    }
+    return true;
+}
+
+// A model's collision box: half its width and length, and where its middle sits from
+// the car's centre (right, front).
+struct Shape {
+    float hw, hl, ox, oy;
+};
+
+// GTA's heading (degrees, 0 north, turning left) as forward and right axes.
+Vector2 forwardOf(float heading)
+{
+    const float h = glm::radians(heading);
+    return Vector2(-std::sin(h), std::cos(h));
+}
+
+Box boxAt(const Shape& s, const Vector2& centre, float heading, float wider = 0.0f, float longer = 0.0f)
+{
+    const Vector2 f = forwardOf(heading), r(f.y, -f.x);
+    return Box { centre + r * s.ox + f * s.oy, f, r, s.hw + wider, s.hl + longer };
+}
+
+// A vehicle as drivers see it this tick (avoid()).
+struct Traffic {
+    int id;
+    int world;
+    Vector3 pos;
+    Vector2 vel;                        // m/s
+    float heading;                      // GTA's, degrees
+    Shape shape;
 };
 
 class DiamondNav final : public IComponent, public PawnEventHandler, public CoreEventHandler, public NPCEventHandler {
@@ -234,6 +329,7 @@ public:
             setAmxLookups(components);
             pawn_->getEventDispatcher().addEventHandler(this);
         }
+        vehicles_ = components->queryComponent<IVehiclesComponent>();
         npcs_ = components->queryComponent<INPCComponent>();
         if (npcs_) npcs_->getEventDispatcher().addEventHandler(this);
         else core_->printLn("[nav] no NPC component: Nav_WalkTo / Nav_DriveTo are off, path searches still work");
@@ -268,6 +364,7 @@ public:
             INPC* npc = npcs_ ? npcs_->get(id) : nullptr;
             if (!npc || npc->getPosition() != m.lastPos || now - m.lastDrive >= DRIVE_IDLE) thinking_.push_back(id);
         }
+        if (!thinking_.empty()) seeTraffic();
         for (int id : thinking_) {
             auto it = movers_.find(id);
             if (it != movers_.end()) drive(id, it->second, now);
@@ -327,6 +424,263 @@ public:
         if (finder.meshLoaded(dnav::MeshKind::Ped) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Ped))
             return true;
         return finder.roads().surfaceAt(x, y, z, ROAD_GROUND_REACH, out);
+    }
+
+    // A model's collision box: vehicles.dnv's (from its DFF), else open.mp's model table
+    // (centred), else a car's.
+    Shape shapeOf(int model)
+    {
+        auto it = shapes_.find(model);
+        if (it != shapes_.end()) return it->second;
+        Shape sh { 0.95f, 2.25f, 0.0f, 0.0f };
+        Vector3 size;
+        if (const dnav::Handling* h = drivingModel.fromFile(model))
+            sh = Shape { h->width * 0.5f, h->length * 0.5f, h->boxX, h->boxY };
+        else if (Impl::getVehicleModelInfo(model, VehicleModelInfo_Size, size) && size.x > 0.1f && size.y > 0.1f)
+            sh = Shape { size.x * 0.5f, size.y * 0.5f, 0.0f, 0.0f };
+        shapes_[model] = sh;
+        return sh;
+    }
+
+    // Where every vehicle is, which way it faces and how fast it goes, once a tick for
+    // every driver: our own drivers by what they are doing, the rest by what the
+    // server last heard.
+    void seeTraffic()
+    {
+        traffic_.clear();
+        if (!vehicles_) return;
+        std::unordered_map<int, const Mover*> driven;
+        for (const auto& [id, m] : movers_) {
+            INPC* npc = npcs_ && driving(m.kind) ? npcs_->get(id) : nullptr;
+            if (npc && npc->getVehicle()) driven[npc->getVehicle()->getID()] = &m;
+        }
+        for (IVehicle* v : *vehicles_) {
+            Traffic t;
+            t.id = v->getID();
+            t.world = v->getVirtualWorld();
+            t.pos = v->getPosition();
+            t.heading = v->getRotation().ToEuler().z;
+            auto d = driven.find(t.id);
+            if (d != driven.end() && d->second->rolling) {
+                t.heading = d->second->heading;
+                t.vel = forwardOf(t.heading) * (d->second->reversing ? -d->second->v : d->second->v);
+            } else {
+                t.vel = Vector2(v->getVelocity()) * VELOCITY_UNIT;
+            }
+            t.shape = shapeOf(v->getModel());
+            traffic_.push_back(t);
+        }
+    }
+
+    // When a car on a course first touches another vehicle (seconds from now, or -1):
+    // its own box (with room round it) sweeps along, turning at `rate` degrees a second
+    // until it is `turn` degrees off `heading`, and every other one moves at its own
+    // velocity. One it already touches beside or behind it is no matter.
+    float firstHit(const std::vector<const Traffic*>& near, const Shape& me, const Vector2& from, float heading,
+        float turn, float rate, float speed, float horizon, const Traffic** who) const
+    {
+        Vector2 at = from;
+        float h = heading, turned = 0.0f;
+        const Box now = boxAt(me, from, heading, AVOID_SIDE, AVOID_FRONT);
+        for (float t = AVOID_STEP; t <= horizon + 1e-4f; t += AVOID_STEP) {
+            const float d = std::min(std::fabs(rate) * AVOID_STEP, std::fabs(turn) - turned);
+            if (d > 0.0f) {
+                h += std::copysign(d, turn);
+                turned += d;
+            }
+            at += forwardOf(h) * (speed * AVOID_STEP);
+            const Box mine = boxAt(me, at, h, AVOID_SIDE, AVOID_FRONT);
+            for (const Traffic* o : near) {
+                const Vector2 start(o->pos);
+                const Box was = boxAt(o->shape, start, o->heading);
+                if (overlaps(now, was) && glm::dot(start - from, now.f) <= 0.0f) continue;
+                if (overlaps(mine, boxAt(o->shape, start + o->vel * t, o->heading))) {
+                    if (who) *who = o;
+                    return t;
+                }
+            }
+        }
+        return -1.0f;
+    }
+
+    // Vehicles in the way, other DiamondNav cars and everyone else's, moving or parked,
+    // by their real collision boxes: the course it is about to take (toward its aim at
+    // its turn rate) is swept forward against every one. If it touches one, it swerves
+    // onto the smallest change of heading that touches nothing (the side it swerved to
+    // last first), no faster than it is going; if every swerve touches something, it
+    // brakes to stop short of it, or to follow it at its speed. A chaser that rams
+    // ignores its target's car.
+    void avoid(Mover& m, IVehicle& car, const Vector3& pos, bool offRoad, float dt, float& error, float& target)
+    {
+        m.avoidFor = std::max(0.0f, m.avoidFor - dt);
+        if (m.avoidFor <= 0.0f) m.avoidSide = 0.0f;
+        if (traffic_.empty()) return;
+        const Shape me = shapeOf(car.getModel());
+        const int world = car.getVirtualWorld();
+        const int ignore = m.chase && (m.chaseFlags & CHASE_RAM) ? m.quarryCar : -1;
+        const float brake = offRoad ? m.car.brakeOff : m.car.brake;
+        const float grip = (offRoad ? m.car.gripOff : m.car.grip) * 0.95f;
+        const float speed = std::max(m.v, AVOID_CREEP);
+        const float horizon = std::clamp(speed / brake + 1.0f, AVOID_HORIZON_MIN, AVOID_HORIZON_MAX);
+        const float range = speed * horizon + me.hl + 15.0f;
+        near_.clear();
+        for (const Traffic& o : traffic_) {
+            if (o.id == car.getID() || o.id == ignore || o.world != world || std::fabs(o.pos.z - pos.z) > AVOID_LEVEL)
+                continue;
+            if (glm::distance(Vector2(o.pos), Vector2(pos)) < range + o.shape.hl + glm::length(o.vel) * horizon)
+                near_.push_back(&o);
+        }
+        if (near_.empty()) return;
+        // As fast as it can turn at this speed: its turning circle, its grip.
+        const float rate = glm::degrees(speed / std::max(m.car.radius, speed * speed / grip));
+        const Traffic* hit = nullptr;
+        const float t = firstHit(near_, me, Vector2(pos), m.heading, error, rate, speed, horizon, &hit);
+        if (t < 0.0f || !hit) {
+            m.blocked = 0.0f;
+            return;
+        }
+        // The side to pass on: the one it is already swerving to, else the one its box
+        // leaves more room on (where its corners reach across the way), else the way it
+        // is turning anyway. It tries every swerve on that side before the other.
+        float first = m.avoidSide;
+        if (first == 0.0f) {
+            const Box b = boxAt(hit->shape, Vector2(hit->pos), hit->heading);
+            const Vector2 left = -boxAt(me, Vector2(pos), m.heading).r;
+            float lo = 1e9f, hi = -1e9f;
+            for (float i : { -1.0f, 1.0f })
+                for (float j : { -1.0f, 1.0f }) {
+                    const float lat = glm::dot(b.c + b.r * (b.hw * i) + b.f * (b.hl * j) - Vector2(pos), left);
+                    lo = std::min(lo, lat);
+                    hi = std::max(hi, lat);
+                }
+            first = std::fabs(hi + lo) > 0.5f ? (hi + lo < 0.0f ? 1.0f : -1.0f) : (error >= 0.0f ? 1.0f : -1.0f);
+        }
+        for (float side : { first, -first }) {
+            for (float swerve : AVOID_SWERVES) {
+                if (swerve == 0.0f && side != first) continue;     // straight on: tried once
+                const float turn = side * swerve;
+                if (firstHit(near_, me, Vector2(pos), m.heading, turn, rate, speed, horizon, nullptr) >= 0.0f) continue;
+                m.avoidSide = side;
+                m.avoidFor = AVOID_STICK;
+                m.blocked = 0.0f;
+                error = turn;
+                target = std::min(target, std::max(m.v, AVOID_CREEP));
+                return;
+            }
+        }
+        // Boxed in: stop short of it, or follow it at its speed; stopped there a while,
+        // back up to make room to swing round it.
+        const float follow = std::max(0.0f, glm::dot(hit->vel, forwardOf(m.heading)));
+        const float room = speed * t - AVOID_GAP;
+        target = std::min(target, room > 0.0f ? std::sqrt(follow * follow + 2.0f * brake * room) : follow);
+        if (m.v < 0.5f && follow < 0.5f) m.blocked += dt;
+        // A chaser held up near a target that stands still has got as near as it will.
+        const bool waiting = m.chase && m.quarryDist < CHASE_CLOSE * 2.0f;
+        if (m.blocked > AVOID_STUCK && canReverse_ && !waiting) {
+            m.blocked = 0.0f;
+            m.avoidSide = first;
+            m.avoidFor = AVOID_STICK + 5.0f;
+            m.backOff = true;
+            backOffClear(m, car, pos);
+        }
+    }
+
+    // Backing up to get round a vehicle: not into another one behind it.
+    void backOffClear(Mover& m, IVehicle& car, const Vector3& pos)
+    {
+        Shape back = shapeOf(car.getModel());
+        back.ox = -back.ox;
+        back.oy = -back.oy;
+        if (firstHit(near_, back, Vector2(pos), m.heading + 180.0f, -m.avoidSide * 45.0f, 30.0f,
+                std::min(REVERSE_SPEED, m.car.reverse), AVOID_HORIZON_MIN, nullptr) >= 0.0f)
+            m.backOff = false;
+    }
+
+    // Ground actually under (x, y) near height z: the meshes, else a road's own deck
+    // (not just a road nearby, as groundUnder takes): false past a bridge's side.
+    bool deckUnder(float x, float y, float z, float& out) const
+    {
+        if (finder.meshLoaded(dnav::MeshKind::Car) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Car))
+            return true;
+        if (finder.meshLoaded(dnav::MeshKind::Ped) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Ped))
+            return true;
+        return finder.roads().deckAt(x, y, z, out);
+    }
+
+    // Driving straight from car toward target on the car's own level: how far it goes
+    // before the deck under it ends. False if it is on no deck now, or it gets to the
+    // target first.
+    bool edgeToward(const dnav::Point& car, const dnav::Point& target, float& at) const
+    {
+        float level;
+        if (!deckUnder(car.x, car.y, car.z, level)) return false;
+        const Vector2 from(car.x, car.y), to(target.x, target.y);
+        const float len = glm::distance(from, to);
+        for (float d = CHASE_EDGE_STEP; d < len; d += CHASE_EDGE_STEP) {
+            const Vector2 p = from + (to - from) * (d / len);
+            float gz;
+            if (!deckUnder(p.x, p.y, level, gz)) {
+                at = d;
+                return true;
+            }
+            level = gz;
+        }
+        return false;
+    }
+
+    // With no car mesh to check a line: whether the way straight to the target runs
+    // over road all along, on one level (nothing stands on a road), but for the last
+    // few metres.
+    bool alongDecks(const dnav::Point& car, const dnav::Point& target) const
+    {
+        float level;
+        if (!deckUnder(car.x, car.y, car.z, level)) return false;
+        const Vector2 from(car.x, car.y), to(target.x, target.y);
+        const float len = glm::distance(from, to);
+        for (float d = CHASE_EDGE_STEP; d < len - CHASE_DECK_SLACK; d += CHASE_EDGE_STEP) {
+            const Vector2 p = from + (to - from) * (d / len);
+            float gz;
+            if (!deckUnder(p.x, p.y, level, gz) || std::fabs(gz - level) > CHASE_DECK_RISE) return false;
+            level = gz;
+        }
+        return std::fabs(level - target.z) < CHASE_DIRECT_DZ;
+    }
+
+    // Off an edge: no grip, no steering, no engine. The car keeps its speed and heading
+    // and falls until it meets a deck on the way down, or the level its target is on.
+    void fly(int npcid, Mover& m, INPC& npc, const Vector3& pos, float dt)
+    {
+        m.vz = std::max(m.vz - GRAVITY * dt, -FALL_MAX);
+        m.yawRate = 0.0f;
+        const float h = glm::radians(m.heading);
+        const float reach = std::max(AHEAD_MIN, m.v * AHEAD_TIME);
+        // NPC_Move's target: as far ahead as reach takes at its speed, as far down as it
+        // falls in that time.
+        const float t = reach / std::max(m.v, 1.0f);
+        Vector3 ahead(pos.x - std::sin(h) * reach, pos.y + std::cos(h) * reach, pos.z + m.vz * t);
+        float floor = m.dropZ + m.carZ, gz;
+        if (deckUnder(ahead.x, ahead.y, ahead.z - m.carZ, gz) && gz + m.carZ >= ahead.z && gz + m.carZ < pos.z)
+            floor = std::max(floor, gz + m.carZ);
+        if (pos.z <= floor + LANDED) {
+            // Down: it drives on from here, and its next think looks at the target again.
+            ahead.z = floor;
+            m.airborne = false;
+            m.drop = false;
+            m.direct = false;
+            m.vz = 0.0f;
+            m.points.clear();
+            m.nextThink = TimePoint {};
+        } else {
+            ahead.z = std::max(ahead.z, floor);
+        }
+        const float speed = std::max(std::sqrt(m.v * m.v + m.vz * m.vz), 0.5f) / SPEED_UNIT;
+        if (!npc.move(ahead, NPCMoveType_Drive, speed, 0.05f)) {
+            end(npcid, END_INTERRUPTED, false);
+            return;
+        }
+        uint16_t ud, lr, keys;
+        npc.getKeys(ud, lr, keys);
+        npc.setKeys(ud, 0, keys);
     }
 
     // Starts a search for npc's walk or drive; true if it was queued.
@@ -530,6 +884,10 @@ public:
             dt = 0.05f;
         }
         dt = std::clamp(dt, 0.0f, 0.25f);
+        if (m.airborne) {
+            fly(npcid, m, *npc, pos, dt);
+            return;
+        }
 
         float target = 0.0f, error = 0.0f, remaining = 0.0f;
         bool offRoad = false;
@@ -599,8 +957,11 @@ public:
                     * std::max(arc, m.car.radius)));
             }
             if (abs > 30.0f) target = std::max(target, TURN_MIN_SPEED);
-            // Brake to stop at the end.
-            target = std::min(target, std::sqrt(2.0f * brakePlan * std::max(0.0f, remaining - ARRIVE * 0.5f)));
+            // Brake to stop at the end; chasing, down to the target's own speed (still,
+            // a stop beside it; moving, keeping up with it), and ramming it, not at all.
+            if (!m.chase || !(m.chaseFlags & CHASE_RAM))
+                target = std::min(target, std::sqrt(m.match * m.match
+                    + 2.0f * brakePlan * std::max(0.0f, remaining - ARRIVE * 0.5f)));
             ahead2 = Vector3(aim);
 
             // Backing up. A car can't turn on the spot: a point behind it and near, or
@@ -628,7 +989,11 @@ public:
                 }
             }
             bool back = m.reversing;
-            if (!m.reversing) {
+            if (m.backOff) {
+                back = m.backed < AVOID_BACK;
+                if (!back) m.backOff = false;
+                else error = m.avoidSide * 45.0f;   // the nose swings to the side it passes on
+            } else if (!m.reversing) {
                 if (abs2 > CIRCLING_TURN && m.v > 1.0f) m.circling += dt;
                 else if (abs2 < CIRCLING_TURN * 0.5f) m.circling = 0.0f;
                 back = (abs2 > REVERSE_BEHIND && d < REVERSE_NEAR * turnR) || (abs2 > REVERSE_INSIDE && inside)
@@ -657,6 +1022,8 @@ public:
             } else if (m.reversing) {
                 target = std::min(std::min(REVERSE_SPEED, m.car.reverse), std::max(target, TURN_MIN_SPEED));
             }
+            if (!m.reversing) avoid(m, *car, pos, offRoad, dt, error, target);
+            else if (m.backOff) backOffClear(m, *car, pos);
         }
 
         // Pulling away follows the car's own acceleration at this speed (its gears, its
@@ -705,7 +1072,18 @@ public:
         // follow), the ground under the point: a car never climbs onto something it
         // has no ground for, nor floats on at the height it was.
         float gz;
-        if (m.ground && finder.groundAt(ahead.x, ahead.y, aheadZ - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
+        if (m.drop && m.direct && !m.reversing) {
+            // Running at an edge: on the deck's own level until the nose is past it,
+            // then off it.
+            const Vector2 nose = Vector2(pos) + Vector2(-std::sin(h), std::cos(h)) * NOSE;
+            if (!deckUnder(nose.x, nose.y, pos.z - m.carZ, gz)) {
+                m.airborne = true;
+                m.vz = 0.0f;
+                fly(npcid, m, *npc, pos, dt);
+                return;
+            }
+            aheadZ = deckUnder(ahead.x, ahead.y, pos.z - m.carZ, gz) ? gz + m.carZ : pos.z;
+        } else if (m.ground && finder.groundAt(ahead.x, ahead.y, aheadZ - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
             aheadZ = gz + m.carZ;
         else if ((m.direct || n < 2) && groundUnder(ahead.x, ahead.y, aheadZ - m.carZ, gz))
             aheadZ = gz + m.carZ;
@@ -790,7 +1168,7 @@ public:
 
     // ── Nav_Chase ────────────────────────────────────────────────────────────
 
-    bool chase(AMX* amx, int npcid, int quarry, float speed, float carZ)
+    bool chase(AMX* amx, int npcid, int quarry, float speed, float carZ, int flags)
     {
         INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
         if (!npc || !npc->getVehicle() || npc->getVehicleSeat() != 0) return false;
@@ -807,6 +1185,7 @@ public:
         m.carZ = carZ;
         m.chase = true;
         m.quarry = quarry;
+        m.chaseFlags = flags;
         m.style = styleOf(npcid, true);
         movers_[npcid] = std::move(m);
         return true;
@@ -842,16 +1221,27 @@ public:
             end(npcid, END_LOST, true);
             return;
         }
+        // Off an edge, it falls where it is going; it looks again once it is down.
+        if (m.airborne) return;
         Vector3 tpos, tvel;
         whereIs(*target, tpos, tvel);
+        IPlayerVehicleData* tdata = queryExtension<IPlayerVehicleData>(*target);
+        m.quarryCar = tdata && tdata->getVehicle() ? tdata->getVehicle()->getID() : -1;
         const Vector3 cpos = car->getPosition();
         const float dist = glm::distance(Vector2(tpos.x, tpos.y), Vector2(cpos.x, cpos.y));
         // Both on the ground, as the meshes and roads have them.
         const dnav::Point carGround { cpos.x, cpos.y, cpos.z - m.carZ };
         const dnav::Point targetGround { tpos.x, tpos.y, tpos.z - FOOT_Z };
 
-        if (dist < CHASE_CLOSE) {
-            // Beside it: drive() brakes to a stop with no path left.
+        const bool ram = m.chaseFlags & CHASE_RAM;
+        const float tspeed = glm::length(Vector2(tvel)) * VELOCITY_UNIT;
+        m.quarryDist = glm::distance(tpos, cpos);
+        m.match = tspeed;
+        // Held up by a vehicle in the way (another chaser beside it) near it is as good.
+        const float close = m.blocked > 0.3f ? CHASE_CLOSE * 2.0f : CHASE_CLOSE;
+        if (dist < close && std::fabs(tpos.z - cpos.z) < CHASE_DIRECT_DZ && tspeed < CHASE_STILL && !ram) {
+            // Beside a target that is standing still: drive() brakes to a stop with no
+            // path left. One that is moving is kept up with instead.
             dropPlan(m);
             m.points.clear();
             m.idle = true;
@@ -861,14 +1251,51 @@ public:
 
         const bool carMesh = finder.meshLoaded(dnav::MeshKind::Car);
         const bool roads = finder.roads().loaded();
-        bool straight = dist < CHASE_DIRECT && std::fabs(tpos.z - cpos.z) < CHASE_DIRECT_DZ
-            && (carMesh ? finder.lineClear(carGround, targetGround, dnav::MeshKind::Car) : dist < CHASE_BLIND);
+        bool straight = std::fabs(tpos.z - cpos.z) < CHASE_DIRECT_DZ
+            && (carMesh ? dist < CHASE_DIRECT && finder.lineClear(carGround, targetGround, dnav::MeshKind::Car)
+                        : dist < CHASE_BLIND || (dist < CHASE_DECKS && alongDecks(carGround, targetGround)));
         // With nothing to plan on, straight at it is all there is.
         if (!carMesh && !roads) straight = true;
+        // A target below, past the edge of the deck the car is on (it dropped off a
+        // bridge, a ledge): straight at it and off the edge, not the roads round.
+        const float below = cpos.z - tpos.z;
+        float edge = 0.0f;
+        const bool drop = !straight && !(m.chaseFlags & CHASE_NO_DROP) && dist < CHASE_DROP && below >= CHASE_DIRECT_DZ && below <= CHASE_DROP_DZ
+            && edgeToward(carGround, targetGround, edge);
+        m.drop = drop;
+        if (drop) {
+            dropPlan(m);
+            Vector3 aim = chaseAim(npcid, m, cpos, tpos, tvel, dist);
+            float gz;
+            if (!groundUnder(aim.x, aim.y, targetGround.z, gz)) gz = targetGround.z;
+            aim.z = gz + m.carZ;
+            m.dropZ = std::min(gz, targetGround.z);
+            // On the deck's level to the edge (drive() finds the deck as it goes), then
+            // down to the target's.
+            m.points.clear();
+            m.speeds.clear();
+            m.points.push_back(cpos);
+            m.speeds.push_back(1.0f);
+            const Vector2 from(cpos.x, cpos.y), dir = glm::normalize(Vector2(tpos.x, tpos.y) - from);
+            const Vector2 lip = from + dir * edge;
+            m.points.push_back(Vector3(lip.x, lip.y, cpos.z));
+            m.speeds.push_back(1.0f);
+            m.points.push_back(aim);
+            m.speeds.push_back(1.0f);
+            m.seg = 0;
+            m.ground = false;
+            m.kind = dnav::PathKind::Drive;
+            m.classes.assign(m.points.size(), dnav::RoadClass::Street);
+            m.junctions.assign(m.points.size(), 0);
+            planSpeeds(m, *car);
+            m.direct = true;
+            m.idle = false;
+            return;
+        }
         if (straight) {
             dropPlan(m);
             // Lead the target, unless that point is round a corner.
-            Vector3 aim = tpos + tvel * CHASE_LEAD;
+            Vector3 aim = chaseAim(npcid, m, cpos, tpos, tvel, dist);
             if (carMesh
                 && !finder.lineClear(carGround, dnav::Point { aim.x, aim.y, aim.z - FOOT_Z }, dnav::MeshKind::Car))
                 aim = tpos;
@@ -924,6 +1351,51 @@ public:
         byRequest_[id] = npcid;
     }
 
+    // Where a chaser aims: where the target will be by the time the car gets there and,
+    // with others after the same target, to one side of it, so they come up either
+    // side of it instead of in a line (not when ramming it).
+    Vector3 chaseAim(int npcid, const Mover& m, const Vector3& cpos, const Vector3& tpos, const Vector3& tvel,
+        float dist) const
+    {
+        const float lead = std::clamp(dist / std::max(m.v, 10.0f), CHASE_LEAD_MIN, CHASE_LEAD_MAX);
+        Vector3 aim = tpos + tvel * (VELOCITY_UNIT * lead);
+        if (m.chaseFlags & CHASE_RAM) return aim;
+        int rank = 0, others = 0;
+        for (const auto& [id, o] : movers_) {
+            if (id == npcid || !o.chase || o.quarry != m.quarry || (o.chaseFlags & CHASE_RAM)) continue;
+            others++;
+            if (id < npcid) rank++;
+        }
+        // Across the way the target is going, or, standing still, across the way to it.
+        Vector2 fwd = Vector2(tvel) * VELOCITY_UNIT;
+        const bool moving = glm::length(fwd) >= CHASE_STILL;
+        if (!others && !moving) return aim;
+        if (!moving) fwd = Vector2(tpos) - Vector2(cpos);
+        if (glm::length(fwd) < 1e-3f) return aim;
+        fwd = glm::normalize(fwd);
+        // Alone after a moving target, it pulls up alongside on the target's left (its
+        // own right, the passenger's side, faces the target), not into its back.
+        const float off = others ? (static_cast<float>(rank) - others * 0.5f) * CHASE_SPREAD : -CHASE_ALONGSIDE;
+        aim.x += fwd.y * off;
+        aim.y -= fwd.x * off;
+        return aim;
+    }
+
+    // Nav_GetChaseInfo: how far the target is and what the chaser is doing about it.
+    bool chaseInfo(int npcid, float& distance, int& mode) const
+    {
+        auto it = movers_.find(npcid);
+        if (it == movers_.end() || !it->second.chase) return false;
+        const Mover& m = it->second;
+        distance = m.quarryDist;
+        if (m.airborne) mode = CHASE_AIRBORNE;
+        else if (m.idle) mode = CHASE_BESIDE;
+        else if (m.direct) mode = m.drop ? CHASE_EDGE : CHASE_STRAIGHT;
+        else if (m.points.empty()) mode = CHASE_PLANNING;
+        else mode = CHASE_ROUTE;
+        return true;
+    }
+
     void dropPlan(Mover& m)
     {
         if (m.plan) byRequest_.erase(m.plan);
@@ -968,6 +1440,10 @@ public:
             setAmxFunctions();
             setAmxLookups();
         }
+        if (component == vehicles_) {
+            vehicles_ = nullptr;
+            traffic_.clear();
+        }
         if (component == npcs_) {
             npcs_ = nullptr;
             movers_.clear();
@@ -987,6 +1463,10 @@ private:
     ICore* core_ = nullptr;
     IPawnComponent* pawn_ = nullptr;
     INPCComponent* npcs_ = nullptr;
+    IVehiclesComponent* vehicles_ = nullptr;
+    std::vector<Traffic> traffic_;              // every vehicle, this tick
+    std::unordered_map<int, Shape> shapes_;     // model -> its collision box
+    std::vector<const Traffic*> near_;          // avoid(): the vehicles near one driver
     std::vector<dnav::PathResult> results_;     // waiting to be handed over
     std::vector<dnav::PathResult> fresh_;
     std::vector<int> thinking_;
@@ -1125,9 +1605,9 @@ SCRIPT_API(Nav_DriveTo, bool(int npcid, float x, float y, float z, float speed, 
         roadOptions(flags));
 }
 
-SCRIPT_API(Nav_Chase, bool(int npcid, int targetid, float speed, float carZ))
+SCRIPT_API(Nav_Chase, bool(int npcid, int targetid, float speed, float carZ, int flags))
 {
-    return DiamondNav::instance && DiamondNav::instance->chase(GetAMX(), npcid, targetid, speed, carZ);
+    return DiamondNav::instance && DiamondNav::instance->chase(GetAMX(), npcid, targetid, speed, carZ, flags);
 }
 
 SCRIPT_API(Nav_Stop, bool(int npcid))
@@ -1251,6 +1731,16 @@ SCRIPT_API(Nav_GetPathPointClass, int(int requestid, int index))
     const dnav::PathResult* r = DiamondNav::instance ? DiamondNav::instance->current : nullptr;
     if (!r || r->id != requestid || index < 0 || index >= static_cast<int>(r->classes.size())) return -1;
     return static_cast<int>(r->classes[index]);
+}
+
+SCRIPT_API(Nav_GetChaseInfo, bool(int npcid, float& distance, int& mode))
+{
+    float d = 0.0f;
+    int how = 0;
+    if (!DiamondNav::instance || !DiamondNav::instance->chaseInfo(npcid, d, how)) return false;
+    distance = d;
+    mode = how;
+    return true;
 }
 
 SCRIPT_API(Nav_GetDriveInfo, bool(int npcid, float& speedKmh, float& wantKmh, int& roadClass, float& limitKmh, bool& reversing))

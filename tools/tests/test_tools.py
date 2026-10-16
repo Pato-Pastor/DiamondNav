@@ -114,7 +114,7 @@ WET\t2.8\t2.0\t1.0\t1.0\t1.0\t0.5
         "nodes0.dat": a0,
         "nodes1.dat": a1,
         # The sultan: wheels under a chassis frame 0.1 m up, 2.6 m apart and 1.6 m
-        # wide, in a 4.6 x 2.0 x 1.4 m collision box.
+        # wide, in a 4.6 x 2.0 x 1.4 m collision box reaching further back than forward.
         "sultan.dff": fg.vehicle_dff([
             ("sultan", (0, 0, 0), -1),
             ("chassis_dummy", (0, 0, 0.1), 0),
@@ -122,7 +122,7 @@ WET\t2.8\t2.0\t1.0\t1.0\t1.0\t0.5
             ("wheel_lf_dummy", (-0.8, 1.35, -0.4), 1),
             ("wheel_rb_dummy", (0.8, -1.25, -0.4), 1),
             ("wheel_lb_dummy", (-0.8, -1.25, -0.4), 1),
-        ], fg.col3("sultan", fg.box_tris((-1.0, -2.3, -0.65), (1.0, 2.3, 0.75)))),
+        ], fg.col3("sultan", fg.box_tris((-1.0, -2.4, -0.65), (1.0, 2.2, 0.75)))),
     })
 
 
@@ -391,12 +391,12 @@ class Roads(unittest.TestCase):
 
 class Vehicles(unittest.TestCase):
     HEAD = ("top", "brake", "brake_off", "coast", "drag", "grip", "grip_off", "radius", "yaw", "reverse",
-            "length", "width", "height", "wheelbase", "ride")
+            "length", "width", "height", "wheelbase", "ride", "box_x", "box_y")
 
     def read(self, path):
         from dnavlib import vehicles
         lines = path.read_text().splitlines()
-        self.assertEqual(lines[0], "DNVH 3")
+        self.assertEqual(lines[0], "DNVH 4")
         rows = {}
         for line in lines[1:]:
             if line.startswith("#"):
@@ -438,6 +438,9 @@ class Vehicles(unittest.TestCase):
             self.assertAlmostEqual(sultan["wheelbase"], 2.6, places=2)
             self.assertAlmostEqual(sultan["length"], 4.6, places=1)
             self.assertAlmostEqual(sultan["width"], 2.0, places=1)
+            # Its box reaches 2.4 m back and 2.2 m forward: its middle is 0.1 m behind its centre.
+            self.assertAlmostEqual(sultan["box_x"], 0.0, places=2)
+            self.assertAlmostEqual(sultan["box_y"], -0.1, places=2)
             # It sits on its front wheel (z -0.3 under the chassis, 0.7 m across) with its springs (0.28 up,
             # -0.20 down, force 1.2) holding its weight: about 0.76 m over the road.
             self.assertAlmostEqual(sultan["ride"], 0.02 + 0.83 * (1.0 - 1.0 / 9.6), places=2)

@@ -24,7 +24,7 @@
 #endif
 #define _DiamondNav_included
 
-#define DIAMONDNAV_INCLUDE_VERSION      (10302)     // 1.3.2
+#define DIAMONDNAV_INCLUDE_VERSION      (10303)     // 1.3.3
 
 // ── Results ──────────────────────────────────────────────────────────────────
 
@@ -50,6 +50,18 @@
 // Nav_DriveTo only: across the car navmesh (anywhere a car fits) instead of the roads.
 #define NAV_DRIVE_OFFROAD       (4)
 
+// Nav_Chase's flags.
+#define NAV_CHASE_RAM           (1)     // drive into the target: no slowing to its speed, no spreading out
+#define NAV_CHASE_NO_DROP       (2)     // never off a bridge or ledge after a target below: the roads round
+
+// What a chaser is doing (Nav_GetChaseInfo).
+#define NAV_CHASE_BESIDE        (0)     // stopped beside a target that stands still
+#define NAV_CHASE_STRAIGHT      (1)     // close, straight at where the target is going
+#define NAV_CHASE_ROUTE         (2)     // along a road route (or across the car navmesh)
+#define NAV_CHASE_PLANNING      (3)     // waiting on its first route
+#define NAV_CHASE_EDGE          (4)     // the target is below: driving at the edge to go off it
+#define NAV_CHASE_AIRBORNE      (5)     // off the edge, falling
+
 // Which navmesh: where peds walk, or where a car fits.
 #define NAV_MESH_PED            (0)
 #define NAV_MESH_CAR            (1)
@@ -67,7 +79,7 @@
 #define NAV_STYLE_CAUTIOUS      (0)     // under the limits, gentle corners, early braking
 #define NAV_STYLE_NORMAL        (1)     // the limits, comfortable corners (Nav_DriveTo's default)
 #define NAV_STYLE_FAST          (2)     // a quarter over the limits, brisk corners, late braking
-#define NAV_STYLE_PURSUIT       (3)     // no limits: as fast as the car and the corners allow
+#define NAV_STYLE_PURSUIT       (3)     // no limits: flat out, cornering and braking on the limit of the car
                                         // (Nav_Chase's default)
 #define NAV_STYLE_DEFAULT       (-1)    // Nav_SetDriveStyle: back to the default
 
@@ -114,18 +126,29 @@ native bool:Nav_WalkTo(npcid, Float:x, Float:y, Float:z, moveType = 1, Float:spe
 // braking to a stop at the end. speed, if above 0, caps it in NPC_MOVE_TYPE_DRIVE's
 // units (1.0 is 10 m/s); carZ is how far the car's centre sits above the road, and
 // 0.0 takes the model's own (vehicles.dnv's, from its wheels and springs, else a
-// guess from open.mp's model table; NAV_VINFO_RIDE).
+// guess from open.mp's model table; NAV_VINFO_RIDE). Like every DiamondNav driver,
+// it swerves round or stops for vehicles in its way (parked, players', other NPCs'),
+// by each model's collision box.
 native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, Float:carZ = 0.0, flags = 0);
 
 // Chases a player (or another NPC) with an NPC's car until Nav_Stop. Far off, it
 // follows the roads while the target is on them, and the car navmesh once the target
 // leaves them; close and with nothing in the way, it drives straight at where the
-// target is going, and it stops beside a target that stops. It re-plans as the
-// target moves, without pausing. The NPC must be the driver. Ends with
-// NAV_END_LOST when the target leaves or changes world. What the NPCs do in the
-// chase (shoot, ram, give up) is the script's. It drives in NAV_STYLE_PURSUIT unless
-// the NPC has a style of its own; speed, if above 0, caps it (as Nav_DriveTo's).
-native bool:Nav_Chase(npcid, targetid, Float:speed = 0.0, Float:carZ = 0.0);
+// target is going (as far ahead as it takes the car to get there), keeps up with a
+// moving target and stops beside a still one. A target that drops off a bridge or a
+// ledge (up to 30 m below, within 60 m) is followed off the edge: the car drives to
+// it on its own level and falls, unless NAV_CHASE_NO_DROP. Several NPCs chasing one
+// target come up either side of it instead of in a line; NAV_CHASE_RAM drives
+// straight into it. It re-plans as the target moves, without pausing. The NPC must
+// be the driver. Ends with NAV_END_LOST when the target leaves or changes world.
+// What the NPCs do in the chase (shoot, give up) is the script's: Nav_GetChaseInfo
+// says how far the target is. It drives in NAV_STYLE_PURSUIT unless the NPC has a
+// style of its own; speed, if above 0, caps it (as Nav_DriveTo's).
+native bool:Nav_Chase(npcid, targetid, Float:speed = 0.0, Float:carZ = 0.0, flags = 0);
+
+// A chaser: how far its target is (m) and what it is doing (NAV_CHASE_BESIDE ..
+// NAV_CHASE_AIRBORNE). False when the NPC is not chasing.
+native bool:Nav_GetChaseInfo(npcid, &Float:distance, &mode);
 
 // Stops a Nav_WalkTo, Nav_DriveTo or Nav_Chase where the NPC is (OnNavMoveEnd:
 // NAV_END_STOPPED).

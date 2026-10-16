@@ -193,6 +193,45 @@ bool RoadGraph::surfaceAt(float x, float y, float z, float reach, float& out) co
     return found;
 }
 
+bool RoadGraph::deckAt(float x, float y, float z, float& out) const
+{
+    constexpr float LEVEL = 4.0f;       // as surfaceAt
+    constexpr float SHOULDER = 1.5f;    // paved past the outer lane
+    constexpr float WIDEST = 40.0f;     // no road is wider than twice this
+    bool found = false;
+    float bestD = 1e30f;
+    const int r = static_cast<int>(std::ceil(WIDEST / CELL));
+    const int cx = cellOf(x), cy = cellOf(y);
+    for (int dx = -r; dx <= r; dx++) {
+        for (int dy = -r; dy <= r; dy++) {
+            auto it = cells_.find(cellKey(cx + dx, cy + dy));
+            if (it == cells_.end()) continue;
+            for (uint32_t i : it->second) {
+                const RoadNode& a = nodes_[i];
+                for (uint32_t k = 0; k < a.edgeCount; k++) {
+                    const RoadEdge& e = edges_[a.firstEdge + k];
+                    const RoadNode& b = nodes_[e.to];
+                    const float ex = b.x - a.x, ey = b.y - a.y;
+                    const float len2 = ex * ex + ey * ey;
+                    const float t = len2 > 1e-6f ? std::clamp(((x - a.x) * ex + (y - a.y) * ey) / len2, 0.0f, 1.0f) : 0.0f;
+                    const float h = a.z + (b.z - a.z) * t;
+                    if (std::fabs(h - z) > LEVEL) continue;
+                    const float half = (e.lanesBack ? e.median * 0.5f + std::max(e.lanes, e.lanesBack) * LANE_WIDTH
+                                                    : e.lanes * LANE_WIDTH * 0.5f) + SHOULDER;
+                    const float px = a.x + ex * t - x, py = a.y + ey * t - y;
+                    const float d = px * px + py * py;
+                    if (d <= half * half && d < bestD) {
+                        bestD = d;
+                        out = h;
+                        found = true;
+                    }
+                }
+            }
+        }
+    }
+    return found;
+}
+
 RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
     std::vector<RoutePoint>& out) const
 {
@@ -216,6 +255,39 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
                     if (d < bestD) {
                         bestD = d;
                         best = static_cast<int>(i);
+                    }
+                }
+            }
+        if (best >= 0) return best;
+        // No node that near, but a long stretch of road may pass close by (a straight
+        // with its nodes far apart): the nearest node at either end of a stretch that
+        // runs within reach.
+        const int r2 = static_cast<int>(std::ceil(EDGE_REACH / CELL));
+        bestD = EDGE_REACH * EDGE_REACH;
+        for (int dx = -r2; dx <= r2; dx++)
+            for (int dy = -r2; dy <= r2; dy++) {
+                auto it = cells_.find(cellKey(cx + dx, cy + dy));
+                if (it == cells_.end()) continue;
+                for (uint32_t i : it->second) {
+                    const RoadNode& a = nodes_[i];
+                    if (!usable(a, opt) || !(start ? hasExit(i, opt) : hasEntry(i, opt))) continue;
+                    const float d = (a.x - x) * (a.x - x) + (a.y - y) * (a.y - y) + 4.0f * (a.z - z) * (a.z - z);
+                    if (d >= bestD) continue;
+                    for (uint32_t k = a.firstEdge; k < a.firstEdge + a.edgeCount; k++) {
+                        // A stretch that may be driven from this node on, with the point
+                        // along it (not past its far end: a one-way street's end is not on it).
+                        if (!edges_[k].lanes || !usable(nodes_[edges_[k].to], opt)) continue;
+                        const RoadNode& b = nodes_[edges_[k].to];
+                        const float ex = b.x - a.x, ey = b.y - a.y, len2 = ex * ex + ey * ey;
+                        if (len2 < 1e-6f) continue;
+                        const float t = ((x - a.x) * ex + (y - a.y) * ey) / len2;
+                        if (t < 0.0f || t > 0.99f) continue;
+                        const float px = a.x + ex * t - x, py = a.y + ey * t - y, pz = a.z + (b.z - a.z) * t - z;
+                        if (px * px + py * py + 4.0f * pz * pz < SEARCH_REACH * SEARCH_REACH) {
+                            bestD = d;
+                            best = static_cast<int>(i);
+                            break;
+                        }
                     }
                 }
             }

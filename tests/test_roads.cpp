@@ -164,6 +164,21 @@ int main()
     CHECK(slope.load(write("roads_slope", hill, { { 0, 1, 1, 1, 0.0f } }), error));
     CHECK(slope.surfaceAt(25, 6, 12.0f, 25, h) && std::fabs(h - 12.5f) < 0.001f);
 
+    // The deck: only over the road's paved width (a lane each way: 5 m and a 1.5 m
+    // shoulder either side of the centre line), on its own level.
+    CHECK(slope.deckAt(25, 6, 12.0f, h) && std::fabs(h - 12.5f) < 0.001f);
+    CHECK(slope.deckAt(25, -6, 12.0f, h));
+    CHECK(!slope.deckAt(25, 8, 12.0f, h));                // past the side: the drop
+    CHECK(!slope.deckAt(25, 0, 30.0f, h));                // a level up
+
+    // A long straight with its nodes 300 m apart: a route still starts and ends along
+    // it, though neither end is within reach of a node.
+    RoadGraph straight;
+    CHECK(straight.load(write("roads_long", { node(0, 0), node(300, 0) }, { { 0, 1, 1, 1, 0.0f } }), error));
+    CHECK(straight.route(100, 0, 10, 220, 0, 10, car, pts) == RouteStatus::Ok);
+    CHECK(pts.size() >= 2 && std::fabs(pts.front().x - 100.0f) < 1.0f && std::fabs(pts.back().x - 220.0f) < 1.0f);
+    CHECK(straight.route(100, 200, 10, 220, 0, 10, car, pts) == RouteStatus::NoStart);   // too far off it
+
     // Bad files.
     RoadGraph bad;
     { std::ofstream("roads_junk.dnr") << "not a road graph"; }

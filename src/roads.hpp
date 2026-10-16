@@ -81,6 +81,7 @@ public:
     static constexpr float LANE_WIDTH = 5.0f;
     static constexpr float MAX_CORNER = 12.0f;
     static constexpr float SEARCH_REACH = 60.0f;
+    static constexpr float EDGE_REACH = 400.0f;    // ...or a stretch of road starting this near
 
     bool load(const std::string& path, std::string& error);
     bool loaded() const { return !nodes_.empty(); }
@@ -93,6 +94,11 @@ public:
     // The road surface's height at (x, y): from the nearest stretch of road within
     // reach (in the plan) that runs within a level of z. False with none.
     bool surfaceAt(float x, float y, float z, float reach, float& out) const;
+
+    // The road's own deck under (x, y): a stretch of road within a level of z whose
+    // paved width (its lanes either side of the median, and a shoulder) covers the
+    // point. False off the edge of every road, as past a bridge's side.
+    bool deckAt(float x, float y, float z, float& out) const;
 
     RouteStatus route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
         std::vector<RoutePoint>& out) const;

@@ -184,7 +184,7 @@ static void plans()
     const auto normal = d.plan(sharp, street, none, sports, DriveStyle::Normal, 0.0f);
     CHECK(near(normal[1], std::sqrt(9.0f * 0.6f * 8.0f), 0.01f));
     const auto pursuit = d.plan(sharp, street, none, sports, DriveStyle::Pursuit, 0.0f);
-    CHECK(near(pursuit[1], std::sqrt(9.0f * 0.9f * 8.0f), 0.01f));
+    CHECK(near(pursuit[1], std::sqrt(9.0f * 0.95f * 8.0f), 0.01f));
     CHECK(pursuit[1] > normal[1]);
     // The truck turns no tighter than its own circle (9 m), on less grip.
     const auto heavy = d.plan(sharp, street, none, truck, DriveStyle::Normal, 0.0f);
@@ -220,7 +220,7 @@ static void vehicles()
     { std::ofstream("driving_bad2.dnv") << "DNVH 1\n560 50 5 9\n"; }
     { std::ofstream("driving_bad3.dnv") << "something else\n"; }
     { std::ofstream("driving_bad4.dnv") << "DNVH 1\n560 50 5 9 -1 5\n"; }
-    { std::ofstream("driving_bad5.dnv") << "DNVH 4\n"; }
+    { std::ofstream("driving_bad5.dnv") << "DNVH 5\n"; }
     for (const char* bad : { "driving_bad1.dnv", "driving_bad2.dnv", "driving_bad3.dnv", "driving_bad4.dnv",
              "driving_bad5.dnv", "driving_missing.dnv" }) {
         Driving e;
@@ -261,8 +261,8 @@ static void fullModels()
     const std::vector<Point> sharp = { { 0, 0, 0 }, { 100, 0, 0 }, { 100, 100, 0 } };
     const std::vector<RoadClass> off(3, RoadClass::OffRoad), street(3, RoadClass::Street);
     const std::vector<uint8_t> none(3, 0);
-    CHECK(near(d.plan(sharp, off, none, h, DriveStyle::Pursuit, 0.0f)[1], std::sqrt(11.2f * 0.9f * 8.0f), 0.01f));
-    CHECK(near(d.plan(sharp, street, none, h, DriveStyle::Pursuit, 0.0f)[1], std::sqrt(15.8f * 0.9f * 8.0f), 0.01f));
+    CHECK(near(d.plan(sharp, off, none, h, DriveStyle::Pursuit, 0.0f)[1], std::sqrt(11.2f * 0.95f * 8.0f), 0.01f));
+    CHECK(near(d.plan(sharp, street, none, h, DriveStyle::Pursuit, 0.0f)[1], std::sqrt(15.8f * 0.95f * 8.0f), 0.01f));
     // The five-number car: its acceleration fades towards its top speed.
     const Handling s = Handling::simple(50.0f, 5.0f, 9.0f, 8.0f, 5.0f);
     CHECK(near(s.accelAt(0.0f, false), 5.0f, 0.001f) && s.accelAt(40.0f, false) < 2.0f);
@@ -282,6 +282,20 @@ static void fullModels()
     { std::ofstream("driving_ride_bad.dnv") << "DNVH 3\n403 30 7 5 2 0.001 6 4 9 2 10 9.2 3.1 4.2 6.9\n"; }
     Driving rb;
     CHECK(!rb.loadVehicles("driving_ride_bad.dnv", error));
+
+    // Version 4 adds where the middle of its collision box sits.
+    {
+        std::ofstream out("driving_box.dnv");
+        out << "DNVH 4\n403 30 7 5 2 0.001 6 4 9 2 10 9.2 3.1 4.2 6.9 1.78 0.05 -0.4";
+        for (int i = 0; i < 2 * ACCEL_POINTS; i++) out << " " << (i % ACCEL_POINTS == ACCEL_POINTS - 1 ? 0.0f : 2.0f);
+        out << "\n";
+    }
+    Driving bx;
+    CHECK(bx.loadVehicles("driving_box.dnv", error));
+    CHECK(near(bx.handling(403).boxX, 0.05f, 0.001f) && near(bx.handling(403).boxY, -0.4f, 0.001f));
+    CHECK(near(bx.handling(403).ride, 1.78f, 0.001f));
+    Driving bb;
+    CHECK(!bb.loadVehicles("driving_ride.dnv", error) || bb.handling(403).boxY == 0.0f);   // version 3: no box
 }
 
 int main()

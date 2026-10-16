@@ -14,8 +14,13 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
   and a driving style (cautious, normal, fast, pursuit) sets how hard they push.
 - **Chasing:** an NPC driver chases a player along the roads, and off them across a
   car-sized navmesh when the player leaves the road; close in, it drives straight
-  at them when nothing is in the way. Drivers steer like cars: they curve into
-  corners, brake for them, and back up to turn round in tight spots.
+  at them when nothing is in the way, keeps up alongside a car that is getting
+  away, and follows a player off a bridge or a ledge. Several chasers come up either
+  side of their target. Drivers steer like cars: they curve into corners, brake for
+  them, and back up to turn round in tight spots.
+- **Traffic sense:** every driver swerves round, or brakes behind, the vehicles in
+  its way (other NPCs' cars, players' cars, parked cars), by each model's own
+  collision box and where it is heading.
 - **Your maps too:** custom SA-MP maps are baked in: objects your scripts create,
   buildings they remove, and custom models with their own collision. Build the
   world from a GTA San Andreas install or from ColAndreas's database.
@@ -63,7 +68,7 @@ loaded:
 [nav] loaded roads.dnr: <nodes> road nodes, <links> links
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
-[nav] DiamondNav 1.3.2: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.3: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -217,8 +222,8 @@ allows, then to stop at the end. What sets the speed:
 - **The style**, `Nav_SetDriveStyle(npcid, style)`: `NAV_STYLE_CAUTIOUS` (under the
   limits, gentle), `NAV_STYLE_NORMAL` (the limits; `Nav_DriveTo`'s default),
   `NAV_STYLE_FAST` (a quarter over, brisk corners, late braking) and
-  `NAV_STYLE_PURSUIT` (no limits at all: as fast as the car and the corners allow;
-  `Nav_Chase`'s default).
+  `NAV_STYLE_PURSUIT` (no limits at all: flat out, cornering on the limit of the
+  car's grip and braking as hard as it can; `Nav_Chase`'s default).
 - **A cap**, if you pass a `speed` above 0 to `Nav_DriveTo` or `Nav_Chase`
   (in `NPC_Move`'s units: 1.0 is 10 m/s).
 
@@ -226,14 +231,34 @@ allows, then to stop at the end. What sets the speed:
 for, the road it is on and that road's limit. With the improved NPC component a
 car also backs up to turn round in a tight spot.
 
-**Chase.** `Nav_Chase(npcid, targetid, speed, carZ)` keeps a driver after a player
-(or another NPC) until `Nav_Stop`. It follows the roads while the target is on one,
-the car navmesh once it leaves them, and drives straight at the target when it is
-close and `Nav_IsLineClear` says nothing is in the way; it stops beside a target
-that stops, and re-plans as the target moves without pausing. It ends with
+**Other vehicles.** Every driver sweeps the course it is about to take against
+every vehicle in its world, by each model's collision box (`vehicles.dnv`, from its
+DFF: its size and where the box sits; else open.mp's model table) turned the way
+that vehicle faces, and moved on at its own speed. If it would touch one, it
+swerves onto the smallest change of heading that touches nothing, keeping to one
+side until it is past; with no way past it brakes to stop short of it, or follows
+it at its speed, and after a moment stopped it backs up to make room (with the
+improved NPC component). Parked cars, players' cars and other NPCs' all count; a
+chaser with `NAV_CHASE_RAM` goes into its target's car on purpose.
+
+**Chase.** `Nav_Chase(npcid, targetid, speed, carZ, flags)` keeps a driver after a
+player (or another NPC) until `Nav_Stop`. It follows the roads while the target is
+on one, the car navmesh once it leaves them, and drives straight at where the
+target is going (as far ahead as the car takes to get there) when it is close and
+nothing is in the way: `Nav_IsLineClear` on the car navmesh, or, without one, a
+line that runs over road all the way (up to 150 m) or a very short one. It keeps
+up with a target that is moving, pulling up alongside on its left, stops beside
+one that stands still, and re-plans as the target moves without pausing. A target
+that drops off a bridge or a ledge (up to 30 m down, within 60 m) is followed off
+the edge: the car drives to it on its own level and falls, keeping its speed, to
+the road below (`NAV_CHASE_NO_DROP` takes the roads round instead). Several NPCs
+after one target come up either side of it instead of in a line;
+`NAV_CHASE_RAM` drives into it without slowing. `Nav_GetChaseInfo(npcid, distance,
+mode)` says how far the target is and what the chaser is doing (beside it,
+straight at it, on a route, running at an edge, in the air). It ends with
 `NAV_END_LOST` if the target leaves or changes world. What the NPCs do during the
-chase (shoot, ram, give up) is your script's. Without a car navmesh it stays on the
-roads and drives straight only when very close.
+chase (shoot, give up) is your script's. `NAV_STYLE_PURSUIT` drives flat out:
+cornering on the limit of the car's grip and braking as hard as it can.
 
 **Lines.** `Nav_IsLineClear(x1, y1, z1, x2, y2, z2, kind)` says whether a ped
 (`NAV_MESH_PED`) or a car (`NAV_MESH_CAR`) can go straight between two points on the
