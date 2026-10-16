@@ -111,8 +111,9 @@ python navtools/dnav.py world bake/world --gta "C:/Games/GTA San Andreas" \
   `<removeWorldObject>`), which most map editors export. A call whose arguments
   are variables can't be read; the build counts them.
 - **Custom models** (`AddSimpleModel`, in your scripts or in
-  `models/artconfig.txt`) get their collision from their DFF, as in the game, or
-  from a `.col` file in the models folder.
+  `models/artconfig.txt`) get their collision from their DFF, as in the game
+  (SA-MP's collision plugin, which 0.3.DL models carry, or Rockstar's), or from a
+  `.col` file in the models folder.
 
 The build prints what it placed and what had no collision.
 

@@ -93,6 +93,11 @@ endif()
 if(MSVC)
     set_property(TARGET DiamondNav navbake navquery dnav_common dnav_recast dnav_detour PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        # A whole-world bake holds every triangle and tile at once: 4 GB, not 2.
+        target_link_options(navbake PRIVATE /LARGEADDRESSAWARE)
+        target_link_options(navquery PRIVATE /LARGEADDRESSAWARE)
+    endif()
 endif()
 
 option(DNAV_TESTS "Build the C++ tests" ON)

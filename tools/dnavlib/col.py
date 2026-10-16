@@ -116,6 +116,8 @@ def read_cols(imgs) -> dict[str, np.ndarray]:
 RW_CLUMP = 0x10
 RW_EXTENSION = 0x03
 RW_COLLISION = 0x253F2FA            # Rockstar's collision plugin: a COL entry
+RW_SAMP_COLLISION = 0x253F2FF       # SA-MP's own, which 0.3.DL custom models carry (the DL client
+                                    # reads only this one)
 
 
 def dff_collision(d: bytes) -> np.ndarray | None:
@@ -125,7 +127,7 @@ def dff_collision(d: bytes) -> np.ndarray | None:
         while at + 12 <= end:
             kind, size = struct.unpack_from("<II", d, at)
             body, stop = at + 12, min(at + 12 + size, end)
-            if kind == RW_COLLISION:
+            if kind in (RW_COLLISION, RW_SAMP_COLLISION):
                 cols = parse_col_file(d[body:stop])
                 if cols:
                     return _join(list(cols.values()))

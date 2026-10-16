@@ -249,6 +249,12 @@ class World(unittest.TestCase):
                       & (np.abs(self.tris[:, :, 1] - (YY - 5)) <= 1.01).all(axis=1)]
         self.assertAlmostEqual(float(k[:, :, 2].max()), YZ + 2.5, places=3)
 
+    def test_samp_collision_plugin(self):
+        entry = fg.col1("kiosk", (-1, -1, 0), (1, 1, 2.5))
+        tris = col.dff_collision(fg.dff_with_col(entry, plugin=0x253F2FF))
+        self.assertIsNotNone(tris)
+        self.assertAlmostEqual(float(tris[:, :, 2].max()), 2.5, places=3)
+
     def test_removed_shed(self):
         self.assertFalse(((np.abs(self.tris[:, :, 0] - (YX - 20)) < 3.1).all(axis=1)
                           & (self.tris[:, :, 2] > YZ + 2).any(axis=1)).any())

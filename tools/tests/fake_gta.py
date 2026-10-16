@@ -67,11 +67,12 @@ def col3(name, tris):
     return b"COL3" + struct.pack("<I", len(body)) + body
 
 
-def dff_with_col(col_entry: bytes) -> bytes:
-    """A DFF that is only a clump carrying a collision plugin (enough for the reader)."""
+def dff_with_col(col_entry: bytes, plugin: int = 0x253F2FA) -> bytes:
+    """A DFF that is only a clump carrying a collision plugin (enough for the reader):
+    Rockstar's (0x253F2FA) or SA-MP's (0x253F2FF, what 0.3.DL custom models carry)."""
     def chunk(kind, body):
         return struct.pack("<3I", kind, len(body), 0x1803FFFF) + body
-    return chunk(0x10, chunk(0x01, struct.pack("<3I", 0, 0, 0)) + chunk(0x03, chunk(0x253F2FA, col_entry)))
+    return chunk(0x10, chunk(0x01, struct.pack("<3I", 0, 0, 0)) + chunk(0x03, chunk(plugin, col_entry)))
 
 
 def write_img(path: Path, files: dict):
