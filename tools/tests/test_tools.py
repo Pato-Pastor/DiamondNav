@@ -391,12 +391,12 @@ class Roads(unittest.TestCase):
 
 class Vehicles(unittest.TestCase):
     HEAD = ("top", "brake", "brake_off", "coast", "drag", "grip", "grip_off", "radius", "yaw", "reverse",
-            "length", "width", "height", "wheelbase")
+            "length", "width", "height", "wheelbase", "ride")
 
     def read(self, path):
         from dnavlib import vehicles
         lines = path.read_text().splitlines()
-        self.assertEqual(lines[0], "DNVH 2")
+        self.assertEqual(lines[0], "DNVH 3")
         rows = {}
         for line in lines[1:]:
             if line.startswith("#"):
@@ -438,6 +438,10 @@ class Vehicles(unittest.TestCase):
             self.assertAlmostEqual(sultan["wheelbase"], 2.6, places=2)
             self.assertAlmostEqual(sultan["length"], 4.6, places=1)
             self.assertAlmostEqual(sultan["width"], 2.0, places=1)
+            # It sits on its front wheel (z -0.3 under the chassis, 0.7 m across) with its springs (0.28 up,
+            # -0.20 down, force 1.2) holding its weight: about 0.76 m over the road.
+            self.assertAlmostEqual(sultan["ride"], 0.02 + 0.83 * (1.0 - 1.0 / 9.6), places=2)
+            self.assertEqual(truck["ride"], 0.0)                             # no DFF: left to the component
             # Dirt: tyres grip it 3.2 / 4.5 as well as a road (surface.dat); the
             # Sandking's off-road ability puts back 40% of that.
             self.assertAlmostEqual(sultan["grip_off"] / sultan["grip"], 3.2 / 4.5, places=2)

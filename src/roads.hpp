@@ -90,6 +90,10 @@ public:
     // The nearest node within reach that a car may leave from (or -1).
     int nearest(float x, float y, float z, float reach, const RouteOptions& opt) const;
 
+    // The road surface's height at (x, y): from the nearest stretch of road within
+    // reach (in the plan) that runs within a level of z. False with none.
+    bool surfaceAt(float x, float y, float z, float reach, float& out) const;
+
     RouteStatus route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
         std::vector<RoutePoint>& out) const;
 

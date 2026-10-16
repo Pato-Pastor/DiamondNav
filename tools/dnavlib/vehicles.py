@@ -9,7 +9,7 @@ time, a bike leans and a Sandking keeps its grip on dirt:
                       traction (multiplier, loss, front/rear bias), gears, top
                       speed, engine acceleration and inertia, drive (F/R/4),
                       brakes (deceleration, bias), steering lock, suspension
-                      (front/rear bias), the handling flags (gear boosts, the
+                      (force, travel, front/rear bias), the handling flags (gear boosts, the
                       speed limit, off-road ability, rear-wheel steering); and
                       the bike lines (lean)
   data/vehicles.ide   which handling each model uses, its kind and wheel size
@@ -24,13 +24,15 @@ comes out is a table the component reads; it does no physics of its own. Nothing
 the game's is copied into DiamondNav: the file is made from your install.
 
 The .dnv layout is text, read by src/driving.cpp:
-  DNVH 2
+  DNVH 3
   MODEL TOP BRAKE BRAKE_OFF COAST DRAG GRIP GRIP_OFF RADIUS YAW REVERSE
-        LENGTH WIDTH HEIGHT WHEELBASE  A0 .. A15  O0 .. O15
+        LENGTH WIDTH HEIGHT WHEELBASE RIDE  A0 .. A15  O0 .. O15
 TOP and REVERSE in m/s; BRAKE, BRAKE_OFF (on dirt), COAST (rolling with no throttle),
 GRIP, GRIP_OFF (sideways, in corners) and A/O (full-throttle acceleration on a road /
 on dirt at TOP * i / 15) in m/s^2; DRAG the air's deceleration per (m/s)^2; RADIUS
-the tightest circle the car's centre turns, LENGTH WIDTH HEIGHT WHEELBASE in metres;
+the tightest circle the car's centre turns, LENGTH WIDTH HEIGHT WHEELBASE in metres,
+RIDE how high its centre sits over the road (from its wheels and suspension; 0 with
+no DFF to read), in metres;
 YAW how fast it can start to turn, in rad/s^2. # starts a comment.
 """
 
@@ -44,7 +46,7 @@ from pathlib import Path
 from . import gta
 
 VEHICLES_MAGIC = "DNVH"
-VEHICLES_VERSION = 2
+VEHICLES_VERSION = 3
 CURVE = 16                      # acceleration samples from 0 to top speed
 
 # --- GTA SA's units ----------------------------------------------------------
@@ -396,6 +398,7 @@ class Model:
     width: float
     height: float
     wheelbase: float
+    ride: float                 # how high the car's centre sits over the road, m
     accel: list
     accel_off: list
     zero100: float              # seconds from 0 to 100 km/h on a road (0: never), for the summary
@@ -571,16 +574,27 @@ def work_out(h: Handling, v: IdeVehicle, body: Body, surface: dict) -> Model:
         wheelbase = max(0.5, yf - yr)
         track = max((abs(p[0]) * 2.0 for p in front + rear), default=1.6) if not two else 0.0
         ground_z = min(p[2] for p in front + rear) - max(v.wheel_front, v.wheel_rear) * 0.5
+        # How high the game sets the car over the road: from a front wheel's suspension
+        # line (the top of its travel down to the bottom of the tyre at full droop),
+        # compressed as far as its spring force holds the weight.
+        wz = front[0][2]
+        top_z = wz + h[SUSP_UPPER]
+        low_z = wz + h[SUSP_LOWER] - v.wheel_front * 0.5
+        squash = 1.0 - 1.0 / (8.0 * max(h[SUSP_FORCE], 0.2))
+        ride = -(top_z + (low_z - top_z) * squash)
     else:
         wheelbase = guess_wheelbase(v.kind, h[MASS])
         yr = -wheelbase * 0.5
         yf = yr + wheelbase
         track = 0.0 if two else 1.6
         ground_z = None
+        ride = None
     if body.lo and body.hi:
         length, width, height = (body.hi[k] - body.lo[k] for k in (1, 0, 2))
         if ground_z is None:
             ground_z = body.lo[2]
+        if ride is None:
+            ride = -body.lo[2]
     else:
         length, width, height = wheelbase * 1.65, (0.8 if two else 1.9), (1.2 if two else 1.5)
         if ground_z is None:
@@ -638,6 +652,7 @@ def work_out(h: Handling, v: IdeVehicle, body: Body, surface: dict) -> Model:
         yaw=clamp(yaw, "yaw"),
         reverse=abs(reverse_v) * TO_MS,
         length=length, width=width, height=height, wheelbase=wheelbase,
+        ride=max(0.2, min(5.0, ride)) if ride is not None else 0.0,     # 0: no DFF, the component guesses
         accel=accel, accel_off=accel_off,
         zero100=time_to(trace, 100.0 / 3.6),
     )
@@ -681,11 +696,11 @@ def models(handling_text: str, ide_text: str, surface_text: str = "", dffs=None)
 
 def write_dnv(rows, path: Path) -> int:
     lines = [f"{VEHICLES_MAGIC} {VEHICLES_VERSION}",
-             "# model top brake brake_off coast drag grip grip_off radius yaw reverse length width height wheelbase"
+             "# model top brake brake_off coast drag grip grip_off radius yaw reverse length width height wheelbase ride"
              f"  accel x{CURVE} (road)  accel x{CURVE} (dirt) - tools/dnav.py vehicles"]
     for model, name, m in sorted(rows, key=lambda r: r[0]):
         head = [m.top, m.brake, m.brake_off, m.coast, m.drag, m.grip, m.grip_off, m.radius, m.yaw, m.reverse,
-                m.length, m.width, m.height, m.wheelbase]
+                m.length, m.width, m.height, m.wheelbase, m.ride]
         nums = " ".join(f"{x:.2f}" if abs(x) >= 0.01 or x == 0 else f"{x:.6f}" for x in head)
         curve = " ".join(f"{a:.2f}" for a in m.accel + m.accel_off)
         note = f"{name.lower()}, {m.top * 3.6:.0f} km/h" + (f", 0-100 in {m.zero100:.1f} s" if m.zero100 else "")

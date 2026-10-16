@@ -152,6 +152,18 @@ int main()
     CHECK(g.route(0, 0, 10, 1000, 1000, 10, car, pts) == RouteStatus::NoEnd);
     CHECK(g.nearest(5, 5, 10, 20, car) == 0);
 
+    // The road surface's height beside a road, for a car off its route: the nearest
+    // stretch within reach, on its own level, its height running along the slope.
+    float h = 0.0f;
+    CHECK(g.surfaceAt(50, 8, 10.5f, 25, h) && std::fabs(h - 10.0f) < 0.001f);
+    CHECK(!g.surfaceAt(50, 60, 10.0f, 25, h));             // too far from any road
+    CHECK(!g.surfaceAt(50, 8, 30.0f, 25, h));              // a level up: not this road
+    RoadGraph slope;
+    std::vector<RoadNode> hill = { node(0, 0), node(100, 0) };
+    hill[1].z = 20.0f;
+    CHECK(slope.load(write("roads_slope", hill, { { 0, 1, 1, 1, 0.0f } }), error));
+    CHECK(slope.surfaceAt(25, 6, 12.0f, 25, h) && std::fabs(h - 12.5f) < 0.001f);
+
     // Bad files.
     RoadGraph bad;
     { std::ofstream("roads_junk.dnr") << "not a road graph"; }

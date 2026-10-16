@@ -33,6 +33,7 @@ struct Handling {
     float yaw = 4.0f;           // how fast it can start (or stop) turning, rad/s^2
     float reverse = 12.0f;      // top speed backing up, m/s
     float length = 4.5f, width = 1.9f, height = 1.5f, wheelbase = 2.6f;    // m
+    float ride = 0.0f;          // its centre over the road, m (0: not known, see rideHeight)
     // Full-throttle acceleration (m/s^2) at top * i / (ACCEL_POINTS - 1): the gears,
     // the engine, the air and how much of it the tyres put down, on a road and on dirt.
     std::array<float, ACCEL_POINTS> accel {}, accelOff {};

@@ -24,7 +24,7 @@
 #endif
 #define _DiamondNav_included
 
-#define DIAMONDNAV_INCLUDE_VERSION      (10301)     // 1.3.1
+#define DIAMONDNAV_INCLUDE_VERSION      (10302)     // 1.3.2
 
 // ── Results ──────────────────────────────────────────────────────────────────
 
@@ -88,6 +88,7 @@
 #define NAV_VINFO_HEIGHT        (13)
 #define NAV_VINFO_WHEELBASE     (14)    // m, from where its wheels are
 #define NAV_VINFO_ZERO_100      (15)    // seconds from 0 to 100 km/h (0: it never gets there)
+#define NAV_VINFO_RIDE          (16)    // m its centre sits over the road (what carZ 0.0 uses)
 
 // ── Information ──────────────────────────────────────────────────────────────
 
@@ -111,9 +112,10 @@ native bool:Nav_WalkTo(npcid, Float:x, Float:y, Float:z, moveType = 1, Float:spe
 // driver. It drives like its car (vehicles.dnv) in its style (Nav_SetDriveStyle):
 // up to each road's speed limit, slowing for corners and junctions in time, and
 // braking to a stop at the end. speed, if above 0, caps it in NPC_MOVE_TYPE_DRIVE's
-// units (1.0 is 10 m/s); carZ is how far the car's centre sits above the road
-// (about 1.0 for a car; more for a truck or bus).
-native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, Float:carZ = 1.0, flags = 0);
+// units (1.0 is 10 m/s); carZ is how far the car's centre sits above the road, and
+// 0.0 takes the model's own (vehicles.dnv's, from its wheels and springs, else a
+// guess from open.mp's model table; NAV_VINFO_RIDE).
+native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, Float:carZ = 0.0, flags = 0);
 
 // Chases a player (or another NPC) with an NPC's car until Nav_Stop. Far off, it
 // follows the roads while the target is on them, and the car navmesh once the target
@@ -123,7 +125,7 @@ native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, Flo
 // NAV_END_LOST when the target leaves or changes world. What the NPCs do in the
 // chase (shoot, ram, give up) is the script's. It drives in NAV_STYLE_PURSUIT unless
 // the NPC has a style of its own; speed, if above 0, caps it (as Nav_DriveTo's).
-native bool:Nav_Chase(npcid, targetid, Float:speed = 0.0, Float:carZ = 1.0);
+native bool:Nav_Chase(npcid, targetid, Float:speed = 0.0, Float:carZ = 0.0);
 
 // Stops a Nav_WalkTo, Nav_DriveTo or Nav_Chase where the NPC is (OnNavMoveEnd:
 // NAV_END_STOPPED).

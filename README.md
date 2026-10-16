@@ -63,7 +63,7 @@ loaded:
 [nav] loaded roads.dnr: <nodes> road nodes, <links> links
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
-[nav] DiamondNav 1.3.1: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.2: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -190,8 +190,13 @@ the NPC along the result point by point with open.mp's `NPC_Move`, and call
 `OnNavMoveEnd(npcid, reason)` at the end: `NAV_END_ARRIVED`, `NAV_END_NO_PATH`,
 `NAV_END_STOPPED` (`Nav_Stop`, or a new move), or `NAV_END_INTERRUPTED` (another
 script moved it, it left the driver's seat, died or was destroyed). A driver must
-be in seat 0; `carZ` is how high the car's centre sits over the road (1.0 for a
-car, more for a truck).
+be in seat 0; `carZ` is how high the car's centre sits over the road, and the
+default (0.0) takes the model's own: `vehicles.dnv`'s, worked out from its wheels
+and springs as the game places it, else a guess from open.mp's model table
+(`NAV_VINFO_RIDE`). Off a road route (a straight run at a chase target, or a car
+left with no path), the car keeps to the ground under it: the car navmesh, else the
+walking navmesh, else the road surface nearby; it never climbs onto a level it has
+no ground for.
 
 **How cars drive.** A driver steers like a car: it looks ahead along its path,
 turns no tighter than its turning circle (nor, at speed, than its grip holds),

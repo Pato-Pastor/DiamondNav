@@ -121,9 +121,9 @@ bool Driving::loadVehicles(const std::string& path, std::string& error)
         error = path + ": not a DiamondNav vehicles file";
         return false;
     }
-    if (version != 1 && version != 2) {
+    if (version < 1 || version > 3) {
         error = path + ": vehicles file version " + std::to_string(version)
-            + ", this build reads 1 and 2 (rebuild it with tools/dnav.py vehicles)";
+            + ", this build reads 1 to 3 (rebuild it with tools/dnav.py vehicles)";
         return false;
     }
     std::unordered_map<int, Handling> table;
@@ -148,12 +148,14 @@ bool Driving::loadVehicles(const std::string& path, std::string& error)
         Handling h;
         bool ok = static_cast<bool>(t >> h.top >> h.brake >> h.brakeOff >> h.coast >> h.drag >> h.grip >> h.gripOff
             >> h.radius >> h.yaw >> h.reverse >> h.length >> h.width >> h.height >> h.wheelbase);
+        if (ok && version >= 3) ok = static_cast<bool>(t >> h.ride);
         for (int i = 0; ok && i < ACCEL_POINTS; i++) ok = static_cast<bool>(t >> h.accel[i]);
         for (int i = 0; ok && i < ACCEL_POINTS; i++) ok = static_cast<bool>(t >> h.accelOff[i]);
         if (!ok || h.top <= 0.0f || h.brake <= 0.0f || h.brakeOff <= 0.0f || h.grip <= 0.0f || h.gripOff <= 0.0f
             || h.radius <= 0.0f || h.yaw <= 0.0f || h.reverse <= 0.0f || h.coast < 0.0f || h.drag < 0.0f
-            || h.accel[0] <= 0.0f) {
-            error = path + ":" + std::to_string(no) + ": takes MODEL and " + std::to_string(14 + 2 * ACCEL_POINTS)
+            || h.ride < 0.0f || h.accel[0] <= 0.0f) {
+            error = path + ":" + std::to_string(no) + ": takes MODEL and "
+                + std::to_string((version >= 3 ? 15 : 14) + 2 * ACCEL_POINTS)
                 + " numbers (tools/dnav.py vehicles), the speeds, brakes, grip, turning and acceleration above 0";
             return false;
         }

@@ -159,6 +159,40 @@ int RoadGraph::nearest(float x, float y, float z, float reach, const RouteOption
     return best;
 }
 
+bool RoadGraph::surfaceAt(float x, float y, float z, float reach, float& out) const
+{
+    constexpr float LEVEL = 4.0f;   // a road further up or down than this is another level
+    bool found = false;
+    float bestD = reach * reach;
+    const int r = static_cast<int>(std::ceil(reach / CELL));
+    const int cx = cellOf(x), cy = cellOf(y);
+    for (int dx = -r; dx <= r; dx++) {
+        for (int dy = -r; dy <= r; dy++) {
+            auto it = cells_.find(cellKey(cx + dx, cy + dy));
+            if (it == cells_.end()) continue;
+            for (uint32_t i : it->second) {
+                const RoadNode& a = nodes_[i];
+                for (uint32_t k = 0; k < a.edgeCount; k++) {
+                    const RoadNode& b = nodes_[edges_[a.firstEdge + k].to];
+                    const float ex = b.x - a.x, ey = b.y - a.y;
+                    const float len2 = ex * ex + ey * ey;
+                    const float t = len2 > 1e-6f ? std::clamp(((x - a.x) * ex + (y - a.y) * ey) / len2, 0.0f, 1.0f) : 0.0f;
+                    const float h = a.z + (b.z - a.z) * t;
+                    if (std::fabs(h - z) > LEVEL) continue;
+                    const float px = a.x + ex * t - x, py = a.y + ey * t - y;
+                    const float d = px * px + py * py;
+                    if (d < bestD) {
+                        bestD = d;
+                        out = h;
+                        found = true;
+                    }
+                }
+            }
+        }
+    }
+    return found;
+}
+
 RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
     std::vector<RoutePoint>& out) const
 {

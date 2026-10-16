@@ -92,6 +92,11 @@ public OnGameModeInit()
         Fail("the Linerunner swings round as fast as the Sultan");
     if (Nav_GetVehicleInfo(495, NAV_VINFO_GRIP_OFFROAD) < Nav_GetVehicleInfo(495, NAV_VINFO_GRIP) * 0.95)
         Fail("the Sandking's off-road ability is lost");
+    // How high each sits: the Sultan from its DFF's wheels and springs (0.76 m), the
+    // Linerunner (no DFF in the yard) from open.mp's model table, a good deal higher.
+    if (floatabs(Nav_GetVehicleInfo(560, NAV_VINFO_RIDE) - 0.76) > 0.01) Fail("the Sultan's ride height is not its DFF's");
+    if (Nav_GetVehicleInfo(403, NAV_VINFO_RIDE) < Nav_GetVehicleInfo(560, NAV_VINFO_RIDE) + 0.6)
+        Fail("the Linerunner does not sit higher than the Sultan");
     Nav_GetVehicleHandling(403, top, accel, brake, grip, radius);
     if (floatabs(top - 109.5) > 1.0) Fail("the Linerunner's handling is not vehicles.dnv's");
     if (!Nav_SetRoadSpeed(NAV_CLASS_MAIN, 36.0) || !Nav_SetRoadSpeed(NAV_CLASS_STREET, 72.0)) Fail("Nav_SetRoadSpeed refused");
@@ -149,7 +154,7 @@ public StartMoving()
     NPC_PutInVehicle(gTruck, gTruckCar, 0);
     if (!Nav_SetDriveStyle(gTruck, NAV_STYLE_PURSUIT) || Nav_GetDriveStyle(gTruck) != NAV_STYLE_PURSUIT)
         Fail("Nav_SetDriveStyle did not take");
-    if (!Nav_DriveTo(gTruck, YX + 60.0, YY - 42.5, YZ + 1.5, 0.0, 1.5)) Fail("Nav_DriveTo refused the truck");
+    if (!Nav_DriveTo(gTruck, YX + 60.0, YY - 42.5, YZ + 1.5)) Fail("Nav_DriveTo refused the truck");   // at its own height
     Nav_SetDriveStyle(gWalker, NAV_STYLE_FAST);
     if (!Nav_SetDriveStyle(gWalker, NAV_STYLE_DEFAULT) || Nav_GetDriveStyle(gWalker) != NAV_STYLE_DEFAULT)
         Fail("NAV_STYLE_DEFAULT did not clear a style");
@@ -286,6 +291,9 @@ public OnNavMoveEnd(npcid, reason)
         GetVehiclePos(gTruckCar, x, y, z);
         printf("[dnav-test] truck ended: reason %d, car at %.1f %.1f %.1f", reason, x, y, z);
         gTrucked = reason == NAV_END_ARRIVED && VectorSize(x - (YX + 60.0), y - (YY - 42.5), 0.0) < 4.0;
+        // On the road at its own ride height: not sunk into it as at a car's.
+        if (floatabs(z - (YZ + Nav_GetVehicleInfo(403, NAV_VINFO_RIDE))) > 0.25)
+            Fail("the truck does not sit on the road at its ride height");
         gDone++;
     } else if (npcid == gTurner) {
         printf("[dnav-test] turner's chase ended: reason %d", reason);

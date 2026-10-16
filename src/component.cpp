@@ -14,6 +14,7 @@
 #include <Server/Components/Pawn/Impl/pawn_natives.hpp>
 #include <Server/Components/Pawn/Impl/pawn_impl.hpp>
 #include <Server/Components/Vehicles/vehicles.hpp>
+#include <Server/Components/Vehicles/vehicle_models.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -60,6 +61,8 @@ constexpr float AHEAD_TIME = 0.5f;      // NPC_Move's target: this far ahead of 
 constexpr float AHEAD_MIN = 3.0f;
 constexpr float ARRIVE = 2.5f;          // a drive ends this near its last point
 constexpr float GROUND_REACH = 3.0f;    // how far up or down the car mesh's ground is looked for
+constexpr float ROAD_GROUND_REACH = 25.0f; // with no mesh there, the road surface this near stands for the ground
+constexpr float RIDE_DEFAULT = 1.0f;    // a car's centre over the road when nothing says otherwise
 constexpr float REVERSE_SPEED = 4.0f;   // m/s backing up (or less: a third of the car's top speed)
 constexpr float REVERSE_BEHIND = 100.0f; // backs up when the point it aims at is further round than this...
 constexpr float REVERSE_NEAR = 2.5f;    // ...and nearer than this many turning radii (a U-turn is two across)
@@ -299,6 +302,33 @@ public:
 
     // ── NPC movement ─────────────────────────────────────────────────────────
 
+    // How high a model's centre sits over the road: vehicles.dnv's (the game's own,
+    // from its wheels and springs), else a guess from open.mp's model table (its front
+    // wheels, with wheels and springs that grow with the vehicle), else 1 m.
+    float rideHeight(int model) const
+    {
+        const float ride = drivingModel.handling(model).ride;
+        if (ride > 0.0f) return ride;
+        Vector3 size, wheels;
+        if (Impl::getVehicleModelInfo(model, VehicleModelInfo_Size, size)
+            && Impl::getVehicleModelInfo(model, VehicleModelInfo_WheelsFront, wheels) && wheels.z < 0.0f) {
+            const float grow = std::clamp((size.z - 1.5f) / 2.7f, 0.0f, 1.0f);
+            return -wheels.z + 0.5f + 0.35f * grow;
+        }
+        return RIDE_DEFAULT;
+    }
+
+    // The ground at (x, y) near height z: the car mesh, else the walking mesh, else the
+    // road surface nearby. False when none of them knows the place.
+    bool groundUnder(float x, float y, float z, float& out) const
+    {
+        if (finder.meshLoaded(dnav::MeshKind::Car) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Car))
+            return true;
+        if (finder.meshLoaded(dnav::MeshKind::Ped) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Ped))
+            return true;
+        return finder.roads().surfaceAt(x, y, z, ROAD_GROUND_REACH, out);
+    }
+
     // Starts a search for npc's walk or drive; true if it was queued.
     bool goTo(AMX* amx, int npcid, dnav::PathKind kind, const Vector3& to, NPCMoveType moveType, float speed,
         float carZ, const dnav::RouteOptions& road)
@@ -309,6 +339,7 @@ public:
         if (driving(kind)) {
             IVehicle* car = npc->getVehicle();
             if (!car || npc->getVehicleSeat() != 0) return false;   // only a driver drives
+            if (carZ <= 0.0f) carZ = rideHeight(car->getModel());
             from = car->getPosition() - Vector3(0.0f, 0.0f, carZ);
         } else {
             from.z -= FOOT_Z;
@@ -670,8 +701,13 @@ public:
                 glm::distance(Vector2(m.points[m.seg]), Vector2(pos)) + reach);
             aheadZ = onPath.z;
         }
+        // Off the roads' own heights (a straight run at a target, or no path left to
+        // follow), the ground under the point: a car never climbs onto something it
+        // has no ground for, nor floats on at the height it was.
         float gz;
         if (m.ground && finder.groundAt(ahead.x, ahead.y, aheadZ - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
+            aheadZ = gz + m.carZ;
+        else if ((m.direct || n < 2) && groundUnder(ahead.x, ahead.y, aheadZ - m.carZ, gz))
             aheadZ = gz + m.carZ;
         ahead.z = aheadZ;
         float moveSpeed = std::max(m.v, 0.5f) / SPEED_UNIT;
@@ -758,6 +794,7 @@ public:
     {
         INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
         if (!npc || !npc->getVehicle() || npc->getVehicleSeat() != 0) return false;
+        if (carZ <= 0.0f) carZ = rideHeight(npc->getVehicle()->getModel());
         IPlayer* target = core_->getPlayers().get(quarry);
         if (!target || target->getID() == npc->getID()) return false;
         end(npcid, END_STOPPED, true);
@@ -835,7 +872,13 @@ public:
             if (carMesh
                 && !finder.lineClear(carGround, dnav::Point { aim.x, aim.y, aim.z - FOOT_Z }, dnav::MeshKind::Car))
                 aim = tpos;
-            aim.z = tpos.z - FOOT_Z + m.carZ;
+            // Its ground: the target's own height only where something says there is
+            // ground there; never up onto a level the car has no ground for.
+            float gz;
+            if (groundUnder(aim.x, aim.y, targetGround.z, gz) || groundUnder(aim.x, aim.y, carGround.z, gz))
+                aim.z = gz + m.carZ;
+            else
+                aim.z = std::min(targetGround.z, carGround.z) + m.carZ;
             // A straight run, with the ground under it every few metres.
             m.points.clear();
             m.speeds.clear();
@@ -845,8 +888,7 @@ public:
             const int steps = static_cast<int>(len / CHASE_GROUND_STEP);
             for (int i = 1; i <= steps; i++) {
                 Vector3 p = cpos + (aim - cpos) * (static_cast<float>(i) / (steps + 1));
-                float gz;
-                if (carMesh && finder.groundAt(p.x, p.y, p.z - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
+                if (groundUnder(p.x, p.y, p.z - m.carZ, gz))
                     p.z = gz + m.carZ;
                 m.points.push_back(p);
                 m.speeds.push_back(1.0f);
@@ -1182,6 +1224,7 @@ SCRIPT_API(Nav_GetVehicleInfo, float(int model, int info))
     case 13: return h.height;
     case 14: return h.wheelbase;
     case 15: return h.accelTime(0.0f, 100.0f / KMH);
+    case 16: return DiamondNav::instance ? DiamondNav::instance->rideHeight(model) : RIDE_DEFAULT;
     default: return 0.0f;
     }
 }

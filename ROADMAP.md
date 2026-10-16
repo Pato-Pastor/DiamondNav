@@ -60,6 +60,9 @@ native (or a few) that a script calls on an NPC it already made.
 - `Nav_GetVehicleInfo`, `Nav_GetVehicleAccel`, `Nav_GetVehicleAccelTime`.
 - 1.3.1: built for open.mp 1.6.7 (its SDK, and the NPC patch rebased onto it; open.mp
   now sends a driving NPC's speed in the game's units and pitches the car itself).
+- 1.3.2: each car sits at its own height over the road (vehicles.dnv version 3, from
+  its wheels and springs; `carZ` 0.0 by default), and cars off a road route keep to
+  the ground (car mesh, walking mesh or the road surface) instead of floating.
 
 ## 1.4: traffic
 

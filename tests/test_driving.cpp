@@ -220,7 +220,7 @@ static void vehicles()
     { std::ofstream("driving_bad2.dnv") << "DNVH 1\n560 50 5 9\n"; }
     { std::ofstream("driving_bad3.dnv") << "something else\n"; }
     { std::ofstream("driving_bad4.dnv") << "DNVH 1\n560 50 5 9 -1 5\n"; }
-    { std::ofstream("driving_bad5.dnv") << "DNVH 3\n"; }
+    { std::ofstream("driving_bad5.dnv") << "DNVH 4\n"; }
     for (const char* bad : { "driving_bad1.dnv", "driving_bad2.dnv", "driving_bad3.dnv", "driving_bad4.dnv",
              "driving_bad5.dnv", "driving_missing.dnv" }) {
         Driving e;
@@ -230,7 +230,7 @@ static void vehicles()
     }
 }
 
-// vehicles.dnv version 2: the whole model, and its acceleration table.
+// vehicles.dnv versions 2 and 3: the whole model, and its acceleration table.
 static void fullModels()
 {
     {
@@ -267,6 +267,21 @@ static void fullModels()
     const Handling s = Handling::simple(50.0f, 5.0f, 9.0f, 8.0f, 5.0f);
     CHECK(near(s.accelAt(0.0f, false), 5.0f, 0.001f) && s.accelAt(40.0f, false) < 2.0f);
     CHECK(near(s.gripOff, 8.0f * 0.7f, 0.001f));
+    CHECK(h.ride == 0.0f);                                  // version 2 does not say how high it sits
+
+    // Version 3 adds how high the car's centre sits over the road.
+    {
+        std::ofstream out("driving_ride.dnv");
+        out << "DNVH 3\n403 30 7 5 2 0.001 6 4 9 2 10 9.2 3.1 4.2 6.9 1.78";
+        for (int i = 0; i < 2 * ACCEL_POINTS; i++) out << " " << (i % ACCEL_POINTS == ACCEL_POINTS - 1 ? 0.0f : 2.0f);
+        out << "\n";
+    }
+    Driving r;
+    CHECK(r.loadVehicles("driving_ride.dnv", error));
+    CHECK(near(r.handling(403).ride, 1.78f, 0.001f) && near(r.handling(403).wheelbase, 6.9f, 0.001f));
+    { std::ofstream("driving_ride_bad.dnv") << "DNVH 3\n403 30 7 5 2 0.001 6 4 9 2 10 9.2 3.1 4.2 6.9\n"; }
+    Driving rb;
+    CHECK(!rb.loadVehicles("driving_ride_bad.dnv", error));
 }
 
 int main()
