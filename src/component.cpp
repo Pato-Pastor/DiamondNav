@@ -477,7 +477,7 @@ public:
     // its own box (with room round it) sweeps along, turning at `rate` degrees a second
     // until it is `turn` degrees off `heading`, and every other one moves at its own
     // velocity. One it already touches beside or behind it is no matter.
-    float firstHit(const std::vector<const Traffic*>& near, const Shape& me, const Vector2& from, float heading,
+    float firstHit(const std::vector<const Traffic*>& nearby, const Shape& me, const Vector2& from, float heading,
         float turn, float rate, float speed, float horizon, const Traffic** who) const
     {
         Vector2 at = from;
@@ -491,7 +491,7 @@ public:
             }
             at += forwardOf(h) * (speed * AVOID_STEP);
             const Box mine = boxAt(me, at, h, AVOID_SIDE, AVOID_FRONT);
-            for (const Traffic* o : near) {
+            for (const Traffic* o : nearby) {
                 const Vector2 start(o->pos);
                 const Box was = boxAt(o->shape, start, o->heading);
                 if (overlaps(now, was) && glm::dot(start - from, now.f) <= 0.0f) continue;
