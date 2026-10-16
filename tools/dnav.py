@@ -10,8 +10,8 @@ Run `dnav.py <command> --help` for each. A typical bake of the whole map:
 
     python3 tools/dnav.py world --gta "C:/Games/GTA San Andreas" --map gamemodes/maps out/world
     navbake out/world.tris navmesh/world.nav --seeds out/world.seeds.txt --water out/world.water.txt
-    navbake out/world.tris navmesh/world_car.nav --agent car --water out/world.water.txt
-    cp out/world.tris navmesh/world.col
+    navbake out/world.car.tris navmesh/world_car.nav --agent car --water out/world.water.txt
+    cp out/world.car.tris navmesh/world.col
     python3 tools/dnav.py roads --gta "C:/Games/GTA San Andreas" navmesh/roads.dnr
     python3 tools/dnav.py vehicles --gta "C:/Games/GTA San Andreas" navmesh/vehicles.dnv
 
@@ -51,11 +51,11 @@ def cmd_world(a):
     if rep.water:
         nb.append(f"--water {a.out.with_suffix('.water.txt')}")
     print("next: " + " ".join(nb))
-    car = [f"navbake {a.out.with_suffix('.tris')} navmesh/world_car.nav --agent car"]
+    car = [f"navbake {a.out.with_suffix('.car.tris')} navmesh/world_car.nav --agent car"]
     if rep.water:
         car.append(f"--water {a.out.with_suffix('.water.txt')}")
     print("and, for cars off the road (Nav_Chase): " + " ".join(car))
-    print(f"and copy {a.out.with_suffix('.tris')} to navmesh/world.col: chasing cars see walls and objects by it")
+    print(f"and copy {a.out.with_suffix('.car.tris')} to navmesh/world.col: chasing cars see walls and objects by it")
     return 0
 
 

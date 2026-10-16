@@ -44,6 +44,7 @@ def make_install(root: Path):
 9004, yard_slab, yard, 300, 0
 9005, yard_pit, yard, 300, 0
 9006, yard_shed, yard, 300, 0
+9007, yard_fence, yard, 300, 0
 end
 """)
     qx, qy, qz, qw = fg.zquat_ipl(90)
@@ -54,7 +55,14 @@ inst
 9002, yard_wall, 0, {YX}, {YY}, {YZ}, {qx}, {qy}, {qz}, {qw}, -1
 9005, yard_pit, 0, {YX + 20}, {YY + 20}, {YZ}, 0, 0, 0, 1, -1
 9006, yard_shed, 0, {YX - 20}, {YY - 20}, {YZ}, 0, 0, 0, 1, -1
+9007, yard_fence, 0, {YX + 10}, {YY + 10}, {YZ}, 0, 0, 0, 1, -1
 end
+""")
+    # A fence a car smashes through, and the wall listed but fixed in place.
+    (root / "data" / "object.dat").write_text("""; name mass turn air elast submerged uproot cdmult cdeff spcdr camav expl
+yard_fence, 50.0, 100.0, 0.99, 0.1, 50.0, 0.0, 1.0, 20, 0, 1, 0
+yard_wall\t99999.0\t99999.0\t0.99\t0.1\t50.0\t0.0\t1.0\t0\t0\t1\t0
+*
 """)
     # How four made-up vehicles drive, and a boat that does not (vehicles.dnv). The
     # lines carry every handling.cfg column; the sultan's DFF is in gta3.img.
@@ -93,6 +101,7 @@ WET\t2.8\t2.0\t1.0\t1.0\t1.0\t0.5
     slab = fg.col1("yard_slab", (-8, -8, -0.5), (8, 8, 0))
     pit = fg.col1("yard_pit", (-5, -5, -4), (5, 5, -3))
     shed = fg.col1("yard_shed", (-3, -3, 0), (3, 3, 3))
+    fence = fg.col1("yard_fence", (-5, -0.05, 0), (5, 0.05, 1.2))
     # Roads: a two-way street west to east through the yard, two lanes each way and
     # a 4 m median, then a one-way street north from its east end, in another area.
     street = [(YX - 100, YY - 40, YZ), (YX, YY - 40, YZ), (YX + 100, YY - 40, YZ)]
@@ -109,7 +118,7 @@ WET\t2.8\t2.0\t1.0\t1.0\t1.0\t0.5
         navi_of={0: [(1, 0)]})
     fg.write_img(root / "models" / "gta3.img", {
         "yard.col": ground + wall,
-        "yard2.col": slab + pit + shed,
+        "yard2.col": slab + pit + shed + fence,
         "yard_stream0.ipl": fg.binary_ipl([(YX + 100, YY, YZ, 0, 0, 0, 1, 9004)]),
         "nodes0.dat": a0,
         "nodes1.dat": a1,
@@ -226,12 +235,21 @@ class World(unittest.TestCase):
 
     def test_counts(self):
         r = self.rep
-        # ground, wall, pit and the binary IPL's slab; the shed removed, the LOD skipped
-        self.assertEqual((r.stock, r.removed, r.lods, r.no_collision), (4, 1, 1, 0))
+        # ground, wall, pit, fence and the binary IPL's slab; the shed removed, the LOD skipped
+        self.assertEqual((r.stock, r.removed, r.lods, r.no_collision), (5, 1, 1, 0))
+        self.assertEqual(r.breakable, 1)         # the fence
         self.assertEqual(r.custom, 2)            # the second wall and the kiosk
         self.assertEqual(r.custom_no_collision, [])
         self.assertEqual(r.skipped_calls, 1)
-        self.assertEqual(r.triangles, 12 * 6)
+        self.assertEqual(r.triangles, 12 * 7)
+
+    def test_car_files_leave_out_the_fence(self):
+        fence = lambda t: ((np.abs(t[:, :, 0] - (YX + 10)) <= 5.01).all(axis=1)
+                           & (np.abs(t[:, :, 1] - (YY + 10)) <= 0.06).all(axis=1))
+        car = read_tris(self.root / "out" / "world.car.tris")
+        self.assertEqual(int(fence(self.tris).sum()), 12)
+        self.assertEqual(int(fence(car).sum()), 0)
+        self.assertEqual(len(car), len(self.tris) - 12)
 
     def test_ipl_wall_runs_along_y(self):
         near = self.tris[(np.abs(self.tris[:, :, 0] - YX) < 1).all(axis=1) & (self.tris[:, :, 2] > YZ + 1).any(axis=1)]
@@ -274,12 +292,14 @@ class World(unittest.TestCase):
             9004: ([], [(0, 0, -0.25, 8, 8, 0.25)], []),
             9005: ([], [(0, 0, -3.5, 5, 5, 0.5)], []),
             9006: ([], [(0, 0, 1.5, 3, 3, 1.5)], []),
+            9007: ([], [(0, 0, 0.6, 5, 0.05, 0.6)], []),
             19379: ([(0, 0, 0, 1.0)], [], [((0, 0, 0), (1, 0, 0), (0, 1, 0))]),
         }, [
             (9001, YX, YY, YZ, 0, 0, 0, 1),
             (9002, YX, YY, YZ, -qx, -qy, -qz, qw),       # ColAndreas stores it ready to use
             (9005, YX + 20, YY + 20, YZ, 0, 0, 0, 1),
             (9006, YX - 20, YY - 20, YZ, 0, 0, 0, 1),
+            (9007, YX + 10, YY + 10, YZ, 0, 0, 0, 1),
             (9004, YX + 100, YY, YZ, 0, 0, 0, 1),
         ])
         path = self.root / "colandreas.cadb"
@@ -288,7 +308,7 @@ class World(unittest.TestCase):
         self.assertEqual(len(parsed.models[19379]), 12 + 1)    # the sphere as a box, and the face
         rep = world.build(self.root / "out" / "ca", cadb_path=path, maps=[self.root / "server" / "map.pwn"],
                           model_dirs=[self.models], area=self.area)
-        self.assertEqual((rep.stock, rep.removed, rep.custom), (4, 1, 2))
+        self.assertEqual((rep.stock, rep.removed, rep.custom), (5, 1, 2))
         self.assertEqual(rep.seeds, 0)                         # no install: no path nodes
         a = self.tris.reshape(-1, 3)
         b = read_tris(self.root / "out" / "ca.tris").reshape(-1, 3)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 from pathlib import Path
 
@@ -87,6 +88,34 @@ def read_ides(gta: Path) -> dict[int, str]:
                     out.setdefault(int(f[0]), f[1].lower())
                 except (ValueError, IndexError):
                     pass
+    return out
+
+
+def read_breakables(gta: Path) -> set[str]:
+    """Lower-case names of the objects a car goes through in the game (data/object.dat):
+    ones that break, smash or change when hit (fences, railings, glass), that are
+    knocked over (lamp posts, signs, traffic lights) or that are light enough to be
+    shoved aside (bins, boxes, barriers). Objects listed with a fixed mass (99999) and
+    no damage effect stay solid."""
+    path = find(gta, "data/object.dat")
+    if path is None:
+        return set()
+    out = set()
+    for line in path.read_text(encoding="latin-1", errors="ignore").splitlines():
+        t = line.split(";")[0].strip()
+        if not t or t.startswith("*"):
+            continue
+        f = [x for x in re.split(r"[,\s]+", t) if x]
+        # name, mass, turn mass, air resistance, elasticity, % submerged, uproot limit,
+        # collision damage multiplier, collision damage effect, ...
+        try:
+            mass, uproot, effect = float(f[1]), float(f[6]), int(float(f[8]))
+        except (ValueError, IndexError):
+            continue
+        if mass >= 99000.0:
+            continue
+        if effect != 0 or uproot > 0.0 or mass <= 1500.0:
+            out.add(f[0].lower())
     return out
 
 

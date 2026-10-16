@@ -74,7 +74,9 @@ native (or a few) that a script calls on an NPC it already made.
 - 1.3.4: chases know the map. `navmesh/world.col` (the bake's world.tris) is loaded
   for rays: chasers check walls and the ground before a straight run, swerve round
   walls and objects, find a railing's gap and line up square to it, and fall without
-  passing through anything. Pursuit routes start wherever the car can join the road
+  passing through anything. Breakable stock objects (object.dat: fences, railings,
+  lamp posts, bins) are left out of the car bake and world.col, so cars smash
+  through them as in the game. Pursuit routes start wherever the car can join the road
   (turning round if that is shorter) and may go against one-way traffic, and the
   chaser aims at the target's smoothed heading so it stops braking for every swerve.
 

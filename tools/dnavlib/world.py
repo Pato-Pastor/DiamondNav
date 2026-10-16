@@ -14,7 +14,10 @@ Custom maps on top: the objects your scripts create and the stock buildings they
 remove (sampmap.py), with custom models' collision taken from their DFFs (or a
 .col of the same name) in the models folders you give.
 
-Writes OUT.tris (navbake's geometry), and when the install's path nodes are there,
+Writes OUT.tris (navbake's geometry), OUT.car.tris (the same without the objects a
+car breaks or knocks over in the game, from data/object.dat: fences, railings, lamp
+posts, bins; for the car navmesh and a server's world.col), and when the install's
+path nodes are there,
 OUT.seeds.txt (points known to be walked or driven: the bake keeps only what is
 connected to them, which drops roofs and closed-off spaces) and OUT.water.txt.
 """
@@ -72,6 +75,7 @@ class Report:
     removed: int = 0
     lods: int = 0
     no_collision: int = 0
+    breakable: int = 0
     custom: int = 0
     custom_no_collision: list[int] = field(default_factory=list)
     skipped_calls: int = 0
@@ -82,6 +86,7 @@ class Report:
     def lines(self):
         out = [f"stock objects placed: {self.stock} ({self.removed} removed by your maps, {self.lods} LODs skipped, "
                f"{self.no_collision} without collision)",
+               f"breakable stock objects (left out of the car files): {self.breakable}",
                f"custom objects placed: {self.custom}"]
         if self.custom_no_collision:
             ids = sorted(set(self.custom_no_collision))
@@ -102,11 +107,13 @@ class Models:
         self.simple = simple
         self.model_dirs = model_dirs
         self.names: dict[int, str] = {}
+        self.breakables: set[str] = set()
         self.cols: dict[str, np.ndarray] = {}
         self.imgs = []
         if gta_dir is not None:
             self.imgs = gta.open_imgs(gta_dir)
             self.names = gta.read_ides(gta_dir)
+            self.breakables = gta.read_breakables(gta_dir)
             self.cols = col.read_cols(self.imgs)
         # Loose .col files in the models folders, by entry name.
         for d in model_dirs:
@@ -126,6 +133,10 @@ class Models:
     def is_lod(self, model: int) -> bool:
         name = self.names.get(model)
         return name is not None and name.startswith("lod")
+
+    def is_breakable(self, model: int) -> bool:
+        name = self.names.get(model)
+        return name is not None and name in self.breakables
 
     def collision(self, model: int):
         if model in self.cache:
@@ -191,7 +202,7 @@ def build(out: Path, gta_dir: Path | None = None, cadb_path: Path | None = None,
             return False
         return area is None or (area[0] <= x <= area[2] and area[1] <= y <= area[3])
 
-    chunks = []
+    chunks, car_chunks = [], []      # everything; what a car can't drive through
     if cadb is not None:
         stock = [(m, x, y, z, quat_matrix(qx, qy, qz, qw)) for m, x, y, z, qx, qy, qz, qw in cadb.placements]
     else:
@@ -210,7 +221,12 @@ def build(out: Path, gta_dir: Path | None = None, cadb_path: Path | None = None,
         if tris is None:
             rep.no_collision += 1
             continue
-        chunks.append(tris @ rot.T + np.array([x, y, z], np.float32))
+        placed = tris @ rot.T + np.array([x, y, z], np.float32)
+        chunks.append(placed)
+        if models.is_breakable(mdl):
+            rep.breakable += 1
+        else:
+            car_chunks.append(placed)
         rep.stock += 1
 
     for o in mapdata.objects:
@@ -220,10 +236,14 @@ def build(out: Path, gta_dir: Path | None = None, cadb_path: Path | None = None,
         if tris is None:
             rep.custom_no_collision.append(o.model)
             continue
-        chunks.append(tris @ object_matrix(o.rx, o.ry, o.rz).T + np.array([o.x, o.y, o.z], np.float32))
+        # A script's objects never break or move in SA-MP, whatever the model.
+        placed = tris @ object_matrix(o.rx, o.ry, o.rz).T + np.array([o.x, o.y, o.z], np.float32)
+        chunks.append(placed)
+        car_chunks.append(placed)
         rep.custom += 1
 
     rep.triangles = write_tris(out.with_suffix(".tris"), chunks)
+    write_tris(out.with_suffix(".car.tris"), car_chunks)
     for img in models.imgs:
         img.close()
 

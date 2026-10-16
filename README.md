@@ -131,17 +131,22 @@ For cars that leave the road (`Nav_Chase`, `NAV_DRIVE_OFFROAD`), bake the same w
 again for a car:
 
 ```sh
-navtools/navbake bake/world.tris navmesh/world_car.nav --agent car --water bake/world.water.txt
+navtools/navbake bake/world.car.tris navmesh/world_car.nav --agent car --water bake/world.water.txt
 ```
 
 For chases, copy the world's collision itself into `navmesh/` too. Drivers cast
-rays against it to see walls, railings, posts and your objects, and to find the
-ground under a car that falls; without it they only know what the car navmesh
-says:
+rays against it to see walls and your objects, and to find the ground under a car
+that falls; without it they only know what the car navmesh says:
 
 ```sh
-cp bake/world.tris navmesh/world.col
+cp bake/world.car.tris navmesh/world.col
 ```
+
+`world.car.tris` is `world.tris` without the stock objects a car breaks or knocks
+over in the game (data/object.dat: fences, railings, lamp posts, signs, bins,
+barriers), so cars go straight through those, on the car navmesh and in a chase,
+as a player's car would. Objects your scripts create never break in SA-MP, so they
+stay solid.
 
 (`dnav.py world` prints these lines with the files it wrote.) `--area "X0 Y0 X1 Y1"` on `dnav.py world` bakes part of it, which is
 quicker for trying things out. A `--routes` file makes navbake check that paths
