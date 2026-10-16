@@ -76,6 +76,7 @@ class Report:
     lods: int = 0
     no_collision: int = 0
     breakable: int = 0
+    breakable_models: dict[str, int] = field(default_factory=dict)
     custom: int = 0
     custom_no_collision: list[int] = field(default_factory=list)
     skipped_calls: int = 0
@@ -86,7 +87,10 @@ class Report:
     def lines(self):
         out = [f"stock objects placed: {self.stock} ({self.removed} removed by your maps, {self.lods} LODs skipped, "
                f"{self.no_collision} without collision)",
-               f"breakable stock objects (left out of the car files): {self.breakable}",
+               f"breakable stock objects (left out of the car files): {self.breakable}"
+               + (" (most placed: " + ", ".join(f"{n} {c}" for n, c in sorted(self.breakable_models.items(),
+                                                                               key=lambda kv: -kv[1])[:8]) + ")"
+                  if self.breakable_models else ""),
                f"custom objects placed: {self.custom}"]
         if self.custom_no_collision:
             ids = sorted(set(self.custom_no_collision))
@@ -225,6 +229,8 @@ def build(out: Path, gta_dir: Path | None = None, cadb_path: Path | None = None,
         chunks.append(placed)
         if models.is_breakable(mdl):
             rep.breakable += 1
+            name = models.names[mdl]
+            rep.breakable_models[name] = rep.breakable_models.get(name, 0) + 1
         else:
             car_chunks.append(placed)
         rep.stock += 1

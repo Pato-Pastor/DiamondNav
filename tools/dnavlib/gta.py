@@ -93,10 +93,12 @@ def read_ides(gta: Path) -> dict[int, str]:
 
 def read_breakables(gta: Path) -> set[str]:
     """Lower-case names of the objects a car goes through in the game (data/object.dat):
-    ones that break, smash or change when hit (fences, railings, glass), that are
-    knocked over (lamp posts, signs, traffic lights) or that are light enough to be
-    shoved aside (bins, boxes, barriers). Objects listed with a fixed mass (99999) and
-    no damage effect stay solid."""
+    ones with a collision damage effect (they break, smash or change when hit: fences,
+    railings, glass, lamp posts, traffic lights, saplings) and ones light enough to be
+    shoved aside (1500 kg or less: bins, cones, boxes, bollards). Fixed objects (mass
+    99999) stay solid, and so do locked doors (special collision response 7) and
+    anything heavier with no damage effect (containers, rocks), even if it can be
+    uprooted."""
     path = find(gta, "data/object.dat")
     if path is None:
         return set()
@@ -107,14 +109,14 @@ def read_breakables(gta: Path) -> set[str]:
             continue
         f = [x for x in re.split(r"[,\s]+", t) if x]
         # name, mass, turn mass, air resistance, elasticity, % submerged, uproot limit,
-        # collision damage multiplier, collision damage effect, ...
+        # collision damage multiplier, collision damage effect, special collision response, ...
         try:
-            mass, uproot, effect = float(f[1]), float(f[6]), int(float(f[8]))
+            mass, effect, special = float(f[1]), int(float(f[8])), int(float(f[9]))
         except (ValueError, IndexError):
             continue
-        if mass >= 99000.0:
+        if mass >= 99000.0 or special == 7:
             continue
-        if effect != 0 or uproot > 0.0 or mass <= 1500.0:
+        if effect != 0 or mass <= 1500.0:
             out.add(f[0].lower())
     return out
 
