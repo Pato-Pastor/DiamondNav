@@ -82,6 +82,7 @@ constexpr float CHASE_DIRECT = 60.0f;       // within this, a clear straight lin
 constexpr float CHASE_BLIND = 25.0f;        // ...or, with no car mesh to check the line, within this
 constexpr float CHASE_DECKS = 150.0f;       // ...or within this, where the line runs over road all the way
 constexpr float CHASE_DECK_SLACK = 8.0f;    // ...but for this last bit (the target stands beside the road)
+constexpr float CHASE_DECK_KEEP = 3.0f;     // m: already driving straight, the road may be this much wider
 constexpr float CHASE_DECK_RISE = 1.0f;     // m a line over road may climb or fall per sample
 constexpr float CHASE_DIRECT_DZ = 4.0f;     // no straight line up or down a level
 constexpr float CHASE_REPLAN = 10.0f;       // re-plan once the target is this far from the plan's end
@@ -598,13 +599,13 @@ public:
 
     // Ground actually under (x, y) near height z: the meshes, else a road's own deck
     // (not just a road nearby, as groundUnder takes): false past a bridge's side.
-    bool deckUnder(float x, float y, float z, float& out) const
+    bool deckUnder(float x, float y, float z, float& out, float wider = 0.0f) const
     {
         if (finder.meshLoaded(dnav::MeshKind::Car) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Car))
             return true;
         if (finder.meshLoaded(dnav::MeshKind::Ped) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Ped))
             return true;
-        return finder.roads().deckAt(x, y, z, out);
+        return finder.roads().deckAt(x, y, z, out, wider);
     }
 
     // Driving straight from car toward target on the car's own level: how far it goes
@@ -631,17 +632,25 @@ public:
     // With no car mesh to check a line: whether the way straight to the target runs
     // over road all along, on one level (nothing stands on a road), but for the last
     // few metres.
-    bool alongDecks(const dnav::Point& car, const dnav::Point& target) const
+    bool alongDecks(const dnav::Point& car, const dnav::Point& target, float wider) const
     {
-        float level;
-        if (!deckUnder(car.x, car.y, car.z, level)) return false;
+        // The car itself may be on the kerb, the target beside the road: the first and
+        // last few metres need no road under them, the rest must be, never climbing or
+        // falling more than a road does.
+        float level = car.z, known = 0.0f;
         const Vector2 from(car.x, car.y), to(target.x, target.y);
         const float len = glm::distance(from, to);
         for (float d = CHASE_EDGE_STEP; d < len - CHASE_DECK_SLACK; d += CHASE_EDGE_STEP) {
             const Vector2 p = from + (to - from) * (d / len);
             float gz;
-            if (!deckUnder(p.x, p.y, level, gz) || std::fabs(gz - level) > CHASE_DECK_RISE) return false;
+            const bool on = deckUnder(p.x, p.y, level, gz, wider)
+                && std::fabs(gz - level) <= CHASE_DECK_RISE * std::max(1.0f, (d - known) / CHASE_EDGE_STEP);
+            if (!on) {
+                if (d > CHASE_DECK_SLACK) return false;
+                continue;
+            }
             level = gz;
+            known = d;
         }
         return std::fabs(level - target.z) < CHASE_DIRECT_DZ;
     }
@@ -1253,7 +1262,8 @@ public:
         const bool roads = finder.roads().loaded();
         bool straight = std::fabs(tpos.z - cpos.z) < CHASE_DIRECT_DZ
             && (carMesh ? dist < CHASE_DIRECT && finder.lineClear(carGround, targetGround, dnav::MeshKind::Car)
-                        : dist < CHASE_BLIND || (dist < CHASE_DECKS && alongDecks(carGround, targetGround)));
+                        : dist < CHASE_BLIND || (dist < CHASE_DECKS
+                            && alongDecks(carGround, targetGround, m.direct ? CHASE_DECK_KEEP : 0.0f)));
         // With nothing to plan on, straight at it is all there is.
         if (!carMesh && !roads) straight = true;
         // A target below, past the edge of the deck the car is on (it dropped off a

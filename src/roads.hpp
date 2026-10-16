@@ -98,7 +98,8 @@ public:
     // The road's own deck under (x, y): a stretch of road within a level of z whose
     // paved width (its lanes either side of the median, and a shoulder) covers the
     // point. False off the edge of every road, as past a bridge's side.
-    bool deckAt(float x, float y, float z, float& out) const;
+    // `wider` widens every road by that much either side.
+    bool deckAt(float x, float y, float z, float& out, float wider = 0.0f) const;
 
     RouteStatus route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
         std::vector<RoutePoint>& out) const;

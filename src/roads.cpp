@@ -193,14 +193,14 @@ bool RoadGraph::surfaceAt(float x, float y, float z, float reach, float& out) co
     return found;
 }
 
-bool RoadGraph::deckAt(float x, float y, float z, float& out) const
+bool RoadGraph::deckAt(float x, float y, float z, float& out, float wider) const
 {
     constexpr float LEVEL = 4.0f;       // as surfaceAt
     constexpr float SHOULDER = 1.5f;    // paved past the outer lane
     constexpr float WIDEST = 40.0f;     // no road is wider than twice this
     bool found = false;
     float bestD = 1e30f;
-    const int r = static_cast<int>(std::ceil(WIDEST / CELL));
+    const int r = static_cast<int>(std::ceil((WIDEST + wider) / CELL));
     const int cx = cellOf(x), cy = cellOf(y);
     for (int dx = -r; dx <= r; dx++) {
         for (int dy = -r; dy <= r; dy++) {
@@ -217,7 +217,7 @@ bool RoadGraph::deckAt(float x, float y, float z, float& out) const
                     const float h = a.z + (b.z - a.z) * t;
                     if (std::fabs(h - z) > LEVEL) continue;
                     const float half = (e.lanesBack ? e.median * 0.5f + std::max(e.lanes, e.lanesBack) * LANE_WIDTH
-                                                    : e.lanes * LANE_WIDTH * 0.5f) + SHOULDER;
+                                                    : e.lanes * LANE_WIDTH * 0.5f) + SHOULDER + wider;
                     const float px = a.x + ex * t - x, py = a.y + ey * t - y;
                     const float d = px * px + py * py;
                     if (d <= half * half && d < bestD) {
