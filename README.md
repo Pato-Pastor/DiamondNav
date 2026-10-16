@@ -272,7 +272,9 @@ moment. Its road routes are a pursuit's: from wherever the car can get on the ro
 turning round if that is shorter (it costs about 35 m), and the wrong way down a
 one-way road at a small cost. It aims at where the target is heading on average,
 not where it points this instant, so a target swerving about does not make it
-brake. It keeps
+brake. With `world.col`, a target below it is driven at straight down a bank or off
+a ledge, and a chaser that goes over an edge falls. A chaser left far behind a
+moving target gets extra speed (up to 35% at 160 m), as the game's police do. It keeps
 up with a target that is moving, pulling up alongside on its left, stops beside
 one that stands still, and re-plans as the target moves without pausing. A target
 that drops off a bridge or a ledge (up to 30 m down, within 60 m) is followed off

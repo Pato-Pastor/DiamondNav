@@ -79,6 +79,11 @@ native (or a few) that a script calls on an NPC it already made.
   through them as in the game. Pursuit routes start wherever the car can join the road
   (turning round if that is shorter) and may go against one-way traffic, and the
   chaser aims at the target's smoothed heading so it stops braking for every swerve.
+- 1.3.5: chases down banks and ledges (from a test in the Los Santos storm drain): with
+  world.col a chaser drives straight at a target below it, down any slope or off a
+  ledge (climbing no more than 27 degrees), ground counts up to 63 degrees, a chaser
+  that goes over an edge falls instead of floating on, and a chaser far behind a
+  moving target gets up to 35% more speed and acceleration to catch up.
 
 ## 1.4: traffic
 
