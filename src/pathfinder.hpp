@@ -25,6 +25,8 @@ class dtNavMeshQuery;
 
 namespace dnav {
 
+class Collision;
+
 enum class PathStatus : int {
     Ok = 0,             // the whole way
     Partial = 1,        // as near as the mesh gets to the end
@@ -61,6 +63,7 @@ struct PathResult {
     std::vector<float> speeds;      // Drive, OffRoad: 0..1 of cruising speed at each point
     std::vector<RoadClass> classes; // Drive, OffRoad: the road each point is on
     std::vector<uint8_t> junctions; // Drive: 1 where the point is in a junction
+    std::vector<uint8_t> ledges;    // OffRoad: 1 where a drop off a ledge starts (its run-up, then off)
 };
 
 class Pathfinder {
@@ -77,6 +80,13 @@ public:
     const RoadGraph& roads() const { return roads_; }
     int tileCount(MeshKind k = MeshKind::Ped) const { return mesh(k).tiles; }
     int polyCount(MeshKind k = MeshKind::Ped) const { return mesh(k).polys; }
+
+    // With the world's collision: one-way drops into the car mesh, off every ledge a
+    // car could drive off to more of the mesh below (a storm drain's edge, a bridge's
+    // side with no railing). Only searches that ask for them (RouteOptions::ledges)
+    // use them. Before start(). Returns how many; `seconds` how long it took.
+    int addLedges(const Collision& world, float& seconds);
+    int ledgeCount() const { return ledges_; }
 
     void start(int threads);
     void stop();
@@ -101,8 +111,8 @@ public:
     // The search itself; any thread with its own query on the right mesh.
     PathResult find(dtNavMeshQuery& q, const PathRequest& r) const;
     PathResult findRoute(const PathRequest& r) const;
-    // The same on the calling thread (navbake's route check).
-    PathResult findNow(const Point& from, const Point& to, MeshKind k = MeshKind::Ped) const;
+    // The same on the calling thread (navbake's route check, navquery).
+    PathResult findNow(const Point& from, const Point& to, MeshKind k = MeshKind::Ped, bool ledges = false) const;
 
 private:
     struct Mesh {
@@ -116,6 +126,7 @@ private:
     void work();
 
     RoadGraph roads_;
+    int ledges_ = 0;
     Mesh meshes_[MESH_KINDS];
     std::deque<std::vector<unsigned char>> data_;   // tile data the meshes point into
 

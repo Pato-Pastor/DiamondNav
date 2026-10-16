@@ -84,6 +84,14 @@ native (or a few) that a script calls on an NPC it already made.
   ledge (climbing no more than 27 degrees), ground counts up to 63 degrees, a chaser
   that goes over an edge falls instead of floating on, and a chaser far behind a
   moving target gets up to 35% more speed and acceleration to catch up.
+- 1.3.6: chases on a real map (from a test on a full Los Santos bake). With the car navmesh and world.col
+  the server finds every ledge a car can drive off at boot (about 50,000 across San
+  Andreas, in about 2 s) and chase routes use them, so a chaser takes the nearest way
+  down to a target in a storm drain. Cars no longer float after driving off a bridge,
+  turn round in narrow streets with a three-point turn, back out of a post the other
+  way when wedged twice, stop swerving off their road at speed for a building past
+  the next corner, and turn round when the target goes behind them instead of driving
+  on. `navquery path ... --car --ledges` shows a chase's route.
 
 ## 1.4: traffic
 

@@ -71,6 +71,9 @@ struct RouteOptions {
     bool anyWay = false;
     bool hasHeading = false;
     float heading = 0.0f;       // GTA's, degrees (0 north, turning left)
+    // The car navmesh (OffRoad): may drive off a ledge where Pathfinder::addLedges
+    // found a drop to more of the mesh below (a chase).
+    bool ledges = false;
 };
 
 enum class RouteStatus : int {

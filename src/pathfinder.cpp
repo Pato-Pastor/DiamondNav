@@ -1,11 +1,16 @@
 #include "pathfinder.hpp"
+#include "collision.hpp"
 #include "navfile.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <map>
+#include <unordered_map>
 
 #include <DetourCommon.h>
 #include <DetourNavMesh.h>
@@ -25,6 +30,283 @@ const float START_REACH[3] = { 1.5f, 2.5f, 1.5f };
 const float CAR_REACH[3] = { 4.0f, 3.0f, 4.0f };    // a car's centre can be well inside its mesh's edge
 constexpr float CORNER_SLOW = 100.0f;   // OffRoad: a turn this sharp (degrees) brings the car to its slowest
 constexpr float CORNER_MIN = 0.35f;     // the slowest, as a share of cruising speed
+
+// Polygon flags: 1 every polygon (navbake), LEDGE the drops addLedges adds, which
+// only a search that asks for them crosses.
+constexpr unsigned short FLAG_LEDGE = 2;
+constexpr unsigned char AREA_LEDGE = 1;
+constexpr float LEDGE_COST = 3.0f;      // a drop costs as much as driving three times its length
+// Ledges: where the car mesh stops at an edge with more of it below.
+constexpr float LEDGE_SPACING = 4.0f;   // a drop every this much along an edge of the mesh
+constexpr float LEDGE_INSET = 0.3f;     // it starts this far in from the mesh's edge
+constexpr float LEDGE_STEP = 0.5f;      // the real edge is looked for this often...
+constexpr float LEDGE_REACH = 5.0f;     // ...this far past the mesh's (the mesh keeps a car's radius back)
+constexpr float LEDGE_LEVEL = 0.6f;     // the ground up to the edge climbs no more than this a step...
+constexpr float LEDGE_FALL = 1.5f;      // ...and the edge is where it is this much lower than at the start
+constexpr float LEDGE_DOWN = 12.0f;     // past it, the mesh below is looked for this far out (down a bank)
+constexpr float LEDGE_MIN = 2.0f;       // a drop at least this far...
+constexpr float LEDGE_MAX = 15.0f;      // ...and at most this far
+constexpr float LEDGE_LAND = 1.5f;      // the mesh below this near where it gets down
+constexpr float LEDGE_LOW = 0.4f;       // m over the ground: a railing, a kerb's wall
+constexpr float LEDGE_HIGH = 1.1f;      // ...and a rail with a gap under it
+constexpr float LEDGE_SIDE = 1.6f;      // a car's half width and some, either side of the way off
+constexpr float LEDGE_RUNUP = 10.0f;    // it starts this far back from the edge, square on to it, where there is room
+constexpr float LEDGE_APART = 2.5f;     // two drops this near on one tile are one
+
+dtQueryFilter plainFilter()
+{
+    dtQueryFilter f;
+    f.setExcludeFlags(FLAG_LEDGE);
+    return f;
+}
+
+dtQueryFilter ledgeFilter()
+{
+    dtQueryFilter f;
+    f.setAreaCost(AREA_LEDGE, LEDGE_COST);
+    return f;
+}
+
+struct Ledge {
+    float start[3], end[3];     // Recast axes
+};
+
+// Detour's own: which neighbour tile a point outside a tile's box is in (0xff inside).
+unsigned char sideOf(const float* pt, const float* bmin, const float* bmax)
+{
+    unsigned char out = 0;
+    out |= (pt[0] >= bmax[0]) ? 1 : 0;
+    out |= (pt[2] >= bmax[2]) ? 2 : 0;
+    out |= (pt[0] < bmin[0]) ? 4 : 0;
+    out |= (pt[2] < bmin[2]) ? 8 : 0;
+    switch (out) {
+    case 1: return 0;
+    case 1 | 2: return 1;
+    case 2: return 2;
+    case 4 | 2: return 3;
+    case 4: return 4;
+    case 4 | 8: return 5;
+    case 8: return 6;
+    case 1 | 8: return 7;
+    }
+    return 0xff;
+}
+
+int align4(int x)
+{
+    return (x + 3) & ~3;
+}
+
+// A tile's data (dtCreateNavMeshData's) again with one-way off-mesh connections
+// added, laid out as Detour lays them out: the same polygons, detail and tree, the
+// connections' two points after the vertices, a polygon each after the polygons,
+// and room for their links. False when the data is not as expected.
+bool withLedges(const std::vector<unsigned char>& in, const std::vector<Ledge>& ledges, std::vector<unsigned char>& out)
+{
+    if (in.size() < sizeof(dtMeshHeader)) return false;
+    dtMeshHeader h;
+    std::memcpy(&h, in.data(), sizeof h);
+    if (h.magic != DT_NAVMESH_MAGIC || h.version != DT_NAVMESH_VERSION || h.offMeshConCount != 0
+        || h.offMeshBase != h.polyCount)
+        return false;
+    const int n = static_cast<int>(ledges.size());
+    const int headerSize = align4(sizeof(dtMeshHeader));
+    const int vertsSize = align4(sizeof(float) * 3 * h.vertCount);
+    const int polysSize = align4(sizeof(dtPoly) * h.polyCount);
+    const int linksSize = align4(sizeof(dtLink) * h.maxLinkCount);
+    const int detailSize = align4(sizeof(dtPolyDetail) * h.detailMeshCount)
+        + align4(sizeof(float) * 3 * h.detailVertCount) + align4(4 * h.detailTriCount);
+    const int bvSize = align4(sizeof(dtBVNode) * h.bvNodeCount);
+    if (headerSize + vertsSize + polysSize + linksSize + detailSize + bvSize != static_cast<int>(in.size())) return false;
+    if (h.vertCount + 2 * n >= 0xffff) return false;
+
+    dtMeshHeader o = h;
+    o.vertCount = h.vertCount + 2 * n;
+    o.polyCount = h.polyCount + n;
+    o.maxLinkCount = h.maxLinkCount + 4 * n;   // its start (both ways) and its end, with room to spare
+    o.offMeshConCount = n;
+    o.offMeshBase = h.polyCount;
+    const int vertsOut = align4(sizeof(float) * 3 * o.vertCount);
+    const int polysOut = align4(sizeof(dtPoly) * o.polyCount);
+    const int linksOut = align4(sizeof(dtLink) * o.maxLinkCount);
+    const int consOut = align4(sizeof(dtOffMeshConnection) * n);
+    out.assign(headerSize + vertsOut + polysOut + linksOut + detailSize + bvSize + consOut, 0);
+
+    const unsigned char* src = in.data() + headerSize;
+    unsigned char* dst = out.data();
+    std::memcpy(dst, &o, sizeof o);
+    dst += headerSize;
+    float* verts = reinterpret_cast<float*>(dst);
+    std::memcpy(verts, src, sizeof(float) * 3 * h.vertCount);
+    for (int i = 0; i < n; i++) {
+        std::memcpy(&verts[(h.vertCount + i * 2) * 3], ledges[i].start, sizeof(float) * 3);
+        std::memcpy(&verts[(h.vertCount + i * 2 + 1) * 3], ledges[i].end, sizeof(float) * 3);
+    }
+    src += vertsSize;
+    dst += vertsOut;
+    dtPoly* polys = reinterpret_cast<dtPoly*>(dst);
+    std::memcpy(polys, src, sizeof(dtPoly) * h.polyCount);
+    for (int i = 0; i < n; i++) {
+        dtPoly& p = polys[h.polyCount + i];
+        p.vertCount = 2;
+        p.verts[0] = static_cast<unsigned short>(h.vertCount + i * 2);
+        p.verts[1] = static_cast<unsigned short>(h.vertCount + i * 2 + 1);
+        p.flags = FLAG_LEDGE;
+        p.setArea(AREA_LEDGE);
+        p.setType(DT_POLYTYPE_OFFMESH_CONNECTION);
+    }
+    src += polysSize + linksSize;   // links are rebuilt when the tile is added
+    dst += polysOut + linksOut;
+    std::memcpy(dst, src, detailSize + bvSize);
+    dst += detailSize + bvSize;
+    dtOffMeshConnection* cons = reinterpret_cast<dtOffMeshConnection*>(dst);
+    for (int i = 0; i < n; i++) {
+        dtOffMeshConnection& c = cons[i];
+        std::memcpy(c.pos, ledges[i].start, sizeof(float) * 3);
+        std::memcpy(c.pos + 3, ledges[i].end, sizeof(float) * 3);
+        c.rad = 1.0f;
+        c.poly = static_cast<unsigned short>(h.polyCount + i);
+        c.flags = 0;                // one way: down
+        c.side = sideOf(ledges[i].end, h.bmin, h.bmax);
+        c.userId = static_cast<unsigned int>(i);
+    }
+    return true;
+}
+
+// The drops off one tile's ledges: along every edge of its polygons with nothing
+// beyond it, out square to the edge, where the ground the mesh is on runs level
+// (no wall, no railing in the way) to an edge it falls away from, and comes down
+// LEDGE_MIN..LEDGE_MAX lower beside more of the car mesh.
+void findLedges(const dtNavMeshQuery& q, const dtMeshTile& tile, const Collision& world, std::vector<Ledge>& out)
+{
+    const dtQueryFilter filter = plainFilter();
+    RayHit hit;
+    for (int pi = 0; pi < tile.header->polyCount; pi++) {
+        const dtPoly& poly = tile.polys[pi];
+        if (poly.getType() != DT_POLYTYPE_GROUND || !(poly.flags & 1)) continue;
+        // Its middle, to tell the edge's outside from its inside.
+        float cx = 0.0f, cy = 0.0f;
+        for (int v = 0; v < poly.vertCount; v++) {
+            float g[3];
+            toGta(&tile.verts[poly.verts[v] * 3], g);
+            cx += g[0];
+            cy += g[1];
+        }
+        cx /= poly.vertCount;
+        cy /= poly.vertCount;
+        for (int e = 0; e < poly.vertCount; e++) {
+            if (poly.neis[e] != 0) continue;   // another polygon, or the next tile
+            float a[3], b[3];
+            toGta(&tile.verts[poly.verts[e] * 3], a);
+            toGta(&tile.verts[poly.verts[(e + 1) % poly.vertCount] * 3], b);
+            const float ex = b[0] - a[0], ey = b[1] - a[1], len = std::hypot(ex, ey);
+            if (len < 1.0f) continue;
+            float nx = ey / len, ny = -ex / len;
+            if (nx * ((a[0] + b[0]) * 0.5f - cx) + ny * ((a[1] + b[1]) * 0.5f - cy) < 0.0f) {
+                nx = -nx;
+                ny = -ny;
+            }
+            const int count = std::max(1, static_cast<int>(len / LEDGE_SPACING));
+            for (int k = 0; k < count; k++) {
+                const float t = (k + 0.5f) / count;
+                const float sx = a[0] + ex * t - nx * LEDGE_INSET, sy = a[1] + ey * t - ny * LEDGE_INSET;
+                float level;
+                if (!world.ground(sx, sy, a[2] + (b[2] - a[2]) * t, 1.0f, 1.5f, level)) continue;
+                // Out to where the ground falls away, never up a wall.
+                float lip = -1.0f, top = level;
+                for (float d = LEDGE_STEP; d <= LEDGE_REACH; d += LEDGE_STEP) {
+                    float gz;
+                    // (Falling away: below where it started by more than LEDGE_FALL, so
+                    // the top of a bank counts as much as a wall's.)
+                    const bool on = world.ground(sx + nx * d, sy + ny * d, top, LEDGE_LEVEL + 1.0f,
+                        top - level + LEDGE_FALL, gz);
+                    if (on && gz > top + LEDGE_LEVEL) break;        // a step up, a wall's top: no edge
+                    if (!on) {
+                        lip = d;
+                        break;
+                    }
+                    top = gz;
+                }
+                if (lip < 0.0f) continue;
+                // Past it, straight down or down a bank, out to where the mesh is below.
+                float lx = 0.0f, ly = 0.0f, landed[3], landedRc[3];
+                bool land = false;
+                {
+                    float prev = top;
+                    for (float d = lip + 1.0f; d <= lip + LEDGE_DOWN; d += 1.0f) {
+                        const float x = sx + nx * d, y = sy + ny * d;
+                        float gz;
+                        if (!world.ground(x, y, prev, LEDGE_LEVEL, LEDGE_MAX, gz) || top - gz > LEDGE_MAX) break;
+                        prev = gz;
+                        if (top - gz < LEDGE_MIN) continue;
+                        float rc[3];
+                        const float p[3] = { x, y, gz };
+                        toRecast(p, rc);
+                        const float ext[3] = { LEDGE_LAND, 1.0f, LEDGE_LAND };
+                        dtPolyRef ref = 0;
+                        q.findNearestPoly(rc, ext, &filter, &ref, landedRc);
+                        if (!ref) continue;
+                        toGta(landedRc, landed);
+                        if (std::hypot(landed[0] - x, landed[1] - y) > LEDGE_LAND || std::fabs(landed[2] - gz) > 1.0f) continue;
+                        lx = x;
+                        ly = y;
+                        land = true;
+                        break;
+                    }
+                }
+                if (!land) continue;
+                // Nothing in the way of a car's width going off it, low or high, from a
+                // run-up square on to the edge (where the mesh has room for one) and
+                // just past the edge, where it leaves it flying level.
+                const float px = sx + nx * (lip + 0.5f), py = sy + ny * (lip + 0.5f);
+                const float fly = std::min(std::hypot(lx - px, ly - py), 3.0f);
+                if (world.wall({ px, py, top + LEDGE_LOW }, { px + nx * fly, py + ny * fly, top + LEDGE_LOW }, hit)) continue;
+                auto clear = [&](float fx, float fy, float fz) {
+                    for (float side : { -LEDGE_SIDE, 0.0f, LEDGE_SIDE }) {
+                        const float ox = -ny * side, oy = nx * side;
+                        for (float up : { LEDGE_LOW, LEDGE_HIGH })
+                            if (world.wall({ fx + ox, fy + oy, fz + up }, { px + ox, py + oy, top + up }, hit)) return false;
+                    }
+                    return true;
+                };
+                float bx = sx, by = sy, bz = level;
+                bool ok = false;
+                for (float back : { LEDGE_RUNUP, LEDGE_RUNUP * 0.6f, LEDGE_RUNUP * 0.3f, 0.0f }) {
+                    const float rx = sx - nx * back, ry = sy - ny * back;
+                    float rz = level;
+                    if (back > 0.0f) {
+                        if (!world.ground(rx, ry, level, LEDGE_LEVEL, LEDGE_LEVEL, rz)) continue;
+                        float rc[3], onRc[3];
+                        const float p[3] = { rx, ry, rz };
+                        toRecast(p, rc);
+                        const float ext[3] = { 0.5f, 1.0f, 0.5f };
+                        dtPolyRef ref = 0;
+                        q.findNearestPoly(rc, ext, &filter, &ref, onRc);
+                        if (!ref || std::hypot(onRc[0] - rc[0], onRc[2] - rc[2]) > 0.3f) continue;
+                    }
+                    if (!clear(rx, ry, rz)) continue;
+                    bx = rx;
+                    by = ry;
+                    bz = rz;
+                    ok = true;
+                    break;
+                }
+                if (!ok) continue;
+                Ledge l;
+                const float start[3] = { bx, by, bz };
+                toRecast(start, l.start);
+                std::memcpy(l.end, landedRc, sizeof l.end);
+                bool near = false;
+                for (const Ledge& o : out)
+                    if (dtVdist(o.start, l.start) < LEDGE_APART) {
+                        near = true;
+                        break;
+                    }
+                if (!near) out.push_back(l);
+            }
+        }
+    }
+}
 
 const float* reachOf(MeshKind k)
 {
@@ -157,6 +439,56 @@ int Pathfinder::addMesh(MeshKind k, std::vector<std::pair<std::string, NavFile>>
     return m.tiles;
 }
 
+int Pathfinder::addLedges(const Collision& world, float& seconds)
+{
+    const auto began = std::chrono::steady_clock::now();
+    seconds = 0.0f;
+    Mesh& m = meshes_[static_cast<int>(MeshKind::Car)];
+    if (!m.mesh || !world.loaded() || ledges_) return 0;
+    const dtNavMesh* cmesh = m.mesh;
+    std::vector<const dtMeshTile*> tiles;
+    for (int i = 0; i < m.mesh->getMaxTiles(); i++) {
+        const dtMeshTile* t = cmesh->getTile(i);
+        if (t && t->header) tiles.push_back(t);
+    }
+    // Found on every core, each with its own query; the mesh is only read.
+    std::vector<std::vector<Ledge>> found(tiles.size());
+    std::atomic<size_t> next { 0 };
+    auto work = [&]() {
+        dtNavMeshQuery* q = dtAllocNavMeshQuery();
+        q->init(m.mesh, 256);
+        for (size_t i; (i = next++) < tiles.size();) findLedges(*q, *tiles[i], world, found[i]);
+        dtFreeNavMeshQuery(q);
+    };
+    const int cores = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 16);
+    std::vector<std::thread> pool;
+    for (int i = 1; i < cores; i++) pool.emplace_back(work);
+    work();
+    for (auto& t : pool) t.join();
+
+    // Each tile with drops goes back in with them.
+    std::unordered_map<const unsigned char*, std::vector<unsigned char>*> owner;
+    for (auto& d : data_) owner[d.data()] = &d;
+    for (size_t i = 0; i < tiles.size(); i++) {
+        if (found[i].empty()) continue;
+        auto it = owner.find(tiles[i]->data);
+        if (it == owner.end()) continue;
+        std::vector<unsigned char>& data = *it->second;
+        std::vector<unsigned char> with;
+        if (!withLedges(data, found[i], with)) continue;
+        const dtTileRef ref = m.mesh->getTileRef(tiles[i]);
+        if (dtStatusFailed(m.mesh->removeTile(ref, nullptr, nullptr))) continue;
+        if (dtStatusSucceed(m.mesh->addTile(with.data(), static_cast<int>(with.size()), 0, ref, nullptr))) {
+            data.swap(with);
+            ledges_ += static_cast<int>(found[i].size());
+        } else {
+            m.mesh->addTile(data.data(), static_cast<int>(data.size()), 0, ref, nullptr);
+        }
+    }
+    seconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - began).count();
+    return ledges_;
+}
+
 void Pathfinder::start(int threads)
 {
     stopping_ = false;
@@ -276,7 +608,7 @@ PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
     res.owner = r.owner;
     res.kind = r.kind;
     const float* reach = reachOf(meshOf(r.kind));
-    dtQueryFilter filter;
+    const dtQueryFilter filter = r.kind == PathKind::OffRoad && r.road.ledges ? ledgeFilter() : plainFilter();
     float s[3], e[3], ns[3], ne[3];
     toRecast(&r.from.x, s);
     toRecast(&r.to.x, e);
@@ -308,7 +640,8 @@ PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
 
     float corners[MAX_CORNERS * 3];
     int ncorners = 0;
-    q.findStraightPath(ns, ne, polys, npolys, corners, nullptr, nullptr, &ncorners, MAX_CORNERS);
+    unsigned char cornerFlags[MAX_CORNERS];
+    q.findStraightPath(ns, ne, polys, npolys, corners, cornerFlags, nullptr, &ncorners, MAX_CORNERS);
     if (ncorners == 0) {
         res.status = PathStatus::NoPath;
         return res;
@@ -320,17 +653,25 @@ PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
     // height there; keep a step only where the ground leaves the straight line.
     std::vector<float> pts;
     std::vector<bool> corner { true };
+    std::vector<uint8_t> ledgeAt { static_cast<uint8_t>(cornerFlags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION ? 1 : 0) };
     pts.insert(pts.end(), corners, corners + 3);
     int at = 0;     // corridor polygon reached so far
     for (int c = 1; c < ncorners; c++) {
         const float* a = &corners[(c - 1) * 3];
         const float* b = &corners[c * 3];
         const float len = std::sqrt((b[0] - a[0]) * (b[0] - a[0]) + (b[2] - a[2]) * (b[2] - a[2]));
-        const int steps = static_cast<int>(len / SAMPLE_STEP);
+        // (A drop off a ledge is a straight line: no ground under it to follow.)
+        const bool ledge = cornerFlags[c - 1] & DT_STRAIGHTPATH_OFFMESH_CONNECTION;
+        const int steps = ledge ? 0 : static_cast<int>(len / SAMPLE_STEP);
         for (int k = 1; k < steps; k++) {
             float p[3];
             dtVlerp(p, a, b, static_cast<float>(k) / steps);
             for (int i = at; i < npolys; i++) {
+                // (A drop off a ledge has a height anywhere along it.)
+                const dtMeshTile* tile = nullptr;
+                const dtPoly* poly = nullptr;
+                q.getAttachedNavMesh()->getTileAndPolyByRefUnsafe(polys[i], &tile, &poly);
+                if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION) continue;
                 float h;
                 if (dtStatusSucceed(q.getPolyHeight(polys[i], p, &h))) {
                     p[1] = h;
@@ -340,9 +681,11 @@ PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
             }
             pts.insert(pts.end(), p, p + 3);
             corner.push_back(false);
+            ledgeAt.push_back(0);
         }
         pts.insert(pts.end(), b, b + 3);
         corner.push_back(true);
+        ledgeAt.push_back(cornerFlags[c] & DT_STRAIGHTPATH_OFFMESH_CONNECTION ? 1 : 0);
     }
 
     // Keep every corner, and a sample only where the ground leaves the line from
@@ -366,7 +709,10 @@ PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
         toGta(&pts[i * 3], &g.x);
         res.points.push_back(g);
     }
-    if (r.kind == PathKind::OffRoad) offRoadSpeeds(res);
+    if (r.kind == PathKind::OffRoad) {
+        offRoadSpeeds(res);
+        for (int i : keep) res.ledges.push_back(ledgeAt[i]);
+    }
     return res;
 }
 
@@ -389,10 +735,11 @@ void Pathfinder::offRoadSpeeds(PathResult& res)
     if (!res.speeds.empty()) res.speeds.back() = CORNER_MIN;
 }
 
-PathResult Pathfinder::findNow(const Point& from, const Point& to, MeshKind k) const
+PathResult Pathfinder::findNow(const Point& from, const Point& to, MeshKind k, bool ledges) const
 {
     PathRequest r;
     r.kind = k == MeshKind::Car ? PathKind::OffRoad : PathKind::Walk;
+    r.road.ledges = ledges;
     r.from = from;
     r.to = to;
     if (!mesh(k).query) {
@@ -407,7 +754,7 @@ bool Pathfinder::nearest(const Point& p, float reach, Point& out, MeshKind k) co
 {
     dtNavMeshQuery* q = mesh(k).query;
     if (!q) return false;
-    dtQueryFilter filter;
+    const dtQueryFilter filter = plainFilter();
     float rc[3], ext[3] = { reach, reach, reach }, hit[3];
     toRecast(&p.x, rc);
     dtPolyRef ref = 0;
@@ -421,7 +768,7 @@ bool Pathfinder::random(Point& out, MeshKind k) const
 {
     dtNavMeshQuery* q = mesh(k).query;
     if (!q) return false;
-    dtQueryFilter filter;
+    const dtQueryFilter filter = plainFilter();
     dtPolyRef ref = 0;
     float rc[3];
     if (dtStatusFailed(q->findRandomPoint(&filter, frand, &ref, rc)) || !ref) return false;
@@ -433,7 +780,7 @@ bool Pathfinder::groundAt(float x, float y, float z, float reach, float& out, Me
 {
     dtNavMeshQuery* q = mesh(k).query;
     if (!q) return false;
-    dtQueryFilter filter;
+    const dtQueryFilter filter = plainFilter();
     const Point p { x, y, z };
     float rc[3], ext[3] = { 0.5f, reach, 0.5f }, hit[3];
     toRecast(&p.x, rc);
@@ -450,7 +797,7 @@ bool Pathfinder::lineClear(const Point& from, const Point& to, MeshKind k) const
 {
     dtNavMeshQuery* q = mesh(k).query;
     if (!q) return false;
-    dtQueryFilter filter;
+    const dtQueryFilter filter = plainFilter();
     float s[3], e[3], ns[3], ne[3];
     toRecast(&from.x, s);
     toRecast(&to.x, e);

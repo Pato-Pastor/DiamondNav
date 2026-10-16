@@ -72,7 +72,7 @@ loaded:
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
 [nav] loaded world.col: <faces> faces
-[nav] DiamondNav 1.3.5: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.6: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -200,6 +200,7 @@ it from your script with `Nav_SetVehicleHandling`.
 navtools/navquery navmesh info
 navtools/navquery navmesh path  1700 -2490 13.5  1650 -2300 13.5
 navtools/navquery navmesh route 1700 -2490 13.5  1480 -1730 13.5
+navtools/navquery navmesh path  2350 -1819 12.5  2350 -1852 0.7 --car --ledges
 python navtools/dnav.py preview check.png --bake bake/world --roads navmesh/roads.dnr
 ```
 
@@ -273,12 +274,18 @@ turning round if that is shorter (it costs about 35 m), and the wrong way down a
 one-way road at a small cost. It aims at where the target is heading on average,
 not where it points this instant, so a target swerving about does not make it
 brake. With `world.col`, a target below it is driven at straight down a bank or off
-a ledge, and a chaser that goes over an edge falls. A chaser left far behind a
+a ledge, and a chaser that goes over an edge falls. With the car navmesh as well,
+the server finds every ledge a car could drive off at boot (a bridge's open side, a
+storm drain's edge: a run-up clear of walls and posts, a drop of 2 to 15 m onto more
+of the car navmesh), and a chase's routes use them as shortcuts, so a chaser drives
+round to the nearest way down instead of the long way by road. It turns round in a
+narrow street with a three-point turn, and backs out and tries the other side when
+it is wedged on a post. A chaser left far behind a
 moving target gets extra speed (up to 35% at 160 m), as the game's police do. It keeps
 up with a target that is moving, pulling up alongside on its left, stops beside
 one that stands still, and re-plans as the target moves without pausing. A target
 that drops off a bridge or a ledge (up to 30 m down, within 60 m) is followed off
-the edge: the car drives to it on its own level and falls, keeping its speed, to
+the edge (without the car navmesh's ledges): the car drives to it on its own level and falls, keeping its speed, to
 the road below. With `world.col` it finds where the edge is, lines up square to it
 and goes through a gap in the railing (the nearest within 12 m), stops falling
 forward when it meets a wall, and lands on whatever is under it (`NAV_CHASE_NO_DROP` takes the roads round instead). Several NPCs

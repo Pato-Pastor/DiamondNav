@@ -1,14 +1,17 @@
 // navquery: check a baked folder from the command line, without a server.
 //
 //   navquery <folder> info
-//   navquery <folder> path  x y z  x y z          a walking path on the navmesh
+//   navquery <folder> path  x y z  x y z [--car] [--ledges]
+//                                                 a walking (or driving) path on the navmesh; --ledges
+//                                                 lets a car drive off ledges (needs world.col)
 //   navquery <folder> route x y z  x y z [--emergency] [--boats]
 //                                                 a driving route on the road graph
-//   navquery <folder> near  x y z [reach]         the nearest walkable point
+//   navquery <folder> near  x y z [reach] [--car] the nearest walkable (or drivable) point
 //
 // Prints one point per line ("x y z", plus the speed factor for a route) and exits
 // 0 when the search found the whole way, 2 for a partial path, 1 otherwise.
 
+#include "collision.hpp"
 #include "pathfinder.hpp"
 
 #include <cstdio>
@@ -38,9 +41,9 @@ int usage()
 {
     std::fprintf(stderr,
         "usage: navquery <folder> info\n"
-        "       navquery <folder> path  x y z  x y z\n"
+        "       navquery <folder> path  x y z  x y z [--car] [--ledges]\n"
         "       navquery <folder> route x y z  x y z [--emergency] [--boats]\n"
-        "       navquery <folder> near  x y z [reach]\n");
+        "       navquery <folder> near  x y z [reach] [--car]\n");
     return 1;
 }
 
@@ -75,8 +78,9 @@ int main(int argc, char** argv)
         float p[4] = { 0, 0, 0, 5.0f };
         if (!points(argc, argv, 3, 3, p)) return usage();
         if (argc > 6) points(argc, argv, 6, 1, p + 3);
+        const bool car = argc > 7 && !std::strcmp(argv[7], "--car");
         Point hit;
-        if (!finder.nearest(Point { p[0], p[1], p[2] }, p[3], hit)) {
+        if (!finder.nearest(Point { p[0], p[1], p[2] }, p[3], hit, car ? MeshKind::Car : MeshKind::Ped)) {
             std::fprintf(stderr, "nothing walkable within %.1f m\n", p[3]);
             return 1;
         }
@@ -99,7 +103,25 @@ int main(int argc, char** argv)
         }
         res = finder.findRoute(r);
     } else {
-        res = finder.findNow(r.from, r.to);
+        bool car = false, ledges = false;
+        for (int i = 9; i < argc; i++) {
+            if (!std::strcmp(argv[i], "--car")) car = true;
+            else if (!std::strcmp(argv[i], "--ledges")) car = ledges = true;
+            else return usage();
+        }
+        if (ledges) {
+            // The drops off ledges need the world's collision: the folder's world.col.
+            Collision world;
+            std::string error;
+            if (!world.load(std::string(argv[1]) + "/world.col", error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+                return 1;
+            }
+            float secs = 0.0f;
+            const int n = finder.addLedges(world, secs);
+            std::fprintf(stderr, "%d ledges (%.1f s)\n", n, secs);
+        }
+        res = finder.findNow(r.from, r.to, car ? MeshKind::Car : MeshKind::Ped, ledges);
     }
     std::fprintf(stderr, "%s: %zu points\n", statusName(res.status), res.points.size());
     for (size_t i = 0; i < res.points.size(); i++) {
