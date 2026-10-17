@@ -73,7 +73,7 @@ loaded:
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
 [nav] loaded world.col: <faces> faces
-[nav] DiamondNav 1.3.10: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.11: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -194,6 +194,25 @@ Without it every car drives as the same average car. To check a model against th
 real game, drive it yourself with a script that times your top speed, 0-100 km/h,
 braking and cornering next to `Nav_GetVehicleInfo`'s numbers, and if one is off, set
 it from your script with `Nav_SetVehicleHandling`.
+
+### 6. Escalators (links.txt)
+
+An escalator's moving steps are not in GTA's collision, so the navmesh has nothing
+joining its foot to its top, and whatever only an escalator leads to (the plaza over
+the Los Santos bank's) is baked as unreachable, like a roof. List each one in
+`navmesh/links.txt` and walkers use it, both ways, with no rebake:
+
+```
+# x y z of each point: the ground at its foot, its first step, its top step, the ground at the top
+1435.90 -1498.37 12.55   1435.03 -1497.87 12.90   1426.54 -1492.98 19.42   1424.80 -1491.98 19.42
+```
+
+A link is two or more points; its ends must be within 1.5 m of the walking mesh, and a
+walker follows the points between (so it climbs the steps' slope, not a line from
+landing to landing). Anything only a link reaches is opened at start. The server's log
+says how many it loaded, and an error names a link whose ends find no mesh or that
+does not join them. A walker sent somewhere from partway up, or after someone standing
+on the steps, goes along the escalator instead of off its side.
 
 ### Checking a bake
 

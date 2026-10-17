@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "navfile.hpp"
@@ -89,6 +90,16 @@ public:
     int addLedges(const Collision& world, float& seconds);
     int ledgeCount() const { return ledges_; }
 
+    // Ways the walking mesh lacks, walked both ways along their own line (two or more
+    // ground points, the ends near the mesh): an escalator's moving steps are not in the map's
+    // collision, so nothing joins its foot to its top. Whatever only a link reaches
+    // (the plaza at the top, which the bake took for a roof) is opened too. load()
+    // reads them from links.txt in its folder. Before start(). Returns the links
+    // added; `opened` the polygons opened.
+    int addLinks(const std::vector<std::vector<Point>>& links, int& opened, std::vector<std::string>& log);
+    int loadLinks(const std::string& path, std::vector<std::string>& log);
+    int linkCount() const { return links_; }
+
     void start(int threads);
     void stop();
 
@@ -133,6 +144,13 @@ private:
     void work();
 
     bool joinRoute(dtNavMeshQuery& car, const PathRequest& r, PathResult& res) const;
+    // Where a point stands on a link's way, off the mesh: the way, the way's next point, the spot.
+    struct OnLink {
+        int way = -1, next = 0;
+        float at[3] {};
+    };
+    std::vector<OnLink> onLinks(const Point& at) const;
+    bool alongLinks(dtNavMeshQuery& q, const PathRequest& r, PathResult& res) const;
     // The car's way along `pts` (ground points) meets no wall in the world's collision
     // at bumper height, but for the legs starting where `drops` is set (true without
     // the collision).
@@ -140,6 +158,8 @@ private:
 
     RoadGraph roads_;
     int ledges_ = 0;
+    int links_ = 0;
+    std::vector<std::vector<float>> linkWays_;     // each link's way, each way (Recast axes): read only once started
     std::atomic<const Collision*> world_ { nullptr };   // addLedges': for checking ways onto roads
     Mesh meshes_[MESH_KINDS];
     std::deque<std::vector<unsigned char>> data_;   // tile data the meshes point into

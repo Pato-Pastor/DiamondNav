@@ -10,8 +10,11 @@
 #include <cstring>
 #include <limits>
 #include <filesystem>
+#include <fstream>
 #include <map>
+#include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <DetourCommon.h>
 #include <DetourNavMesh.h>
@@ -33,9 +36,16 @@ constexpr float CORNER_SLOW = 100.0f;   // OffRoad: a turn this sharp (degrees) 
 constexpr float CORNER_MIN = 0.35f;     // the slowest, as a share of cruising speed
 
 // Polygon flags: 1 every polygon (navbake), LEDGE the drops addLedges adds, which
-// only a search that asks for them crosses.
+// only a search that asks for them crosses. 0 is a polygon nobody reaches (a roof):
+// every search leaves it out.
+constexpr unsigned short FLAG_WALK = 1;
 constexpr unsigned short FLAG_LEDGE = 2;
 constexpr unsigned char AREA_LEDGE = 1;
+constexpr unsigned char AREA_LINK = 2;  // addLinks' ways: walked along their own line
+const float LINK_REACH[3] = { 1.5f, 1.0f, 1.5f };  // a link's end finds the mesh this near it
+constexpr float LINK_ON = 0.75f;        // m: a walker this near a link's line (and LINK_ON_DZ of its height)...
+constexpr float LINK_ON_DZ = 1.2f;
+constexpr float LINK_ON_END = 1.0f;     // ...and further than this from its ends is on it, off the mesh
 constexpr float MOMENTUM_FROM = 6.0f;   // m/s: slower than this, the way from where it is
 constexpr float MOMENTUM_AHEAD = 1.5f;  // s: the ways from this far on along its heading, and twice it...
 constexpr float MOMENTUM_MIN = 10.0f;   // m: ...no nearer...
@@ -84,8 +94,13 @@ dtQueryFilter ledgeFilter()
     return f;
 }
 
-struct Ledge {
+// One way off the mesh and on again elsewhere: a drop off a ledge, or one way of a link.
+struct Connection {
     float start[3], end[3];     // Recast axes
+    unsigned short flags = FLAG_LEDGE;
+    unsigned char area = AREA_LEDGE;
+    float rad = 1.0f;           // its ends find the mesh this near them
+    unsigned int userId = 0;    // a link's way: Pathfinder::linkWays_[userId - 1]
 };
 
 // Detour's own: which neighbour tile a point outside a tile's box is in (0xff inside).
@@ -118,7 +133,7 @@ int align4(int x)
 // added, laid out as Detour lays them out: the same polygons, detail and tree, the
 // connections' two points after the vertices, a polygon each after the polygons,
 // and room for their links. False when the data is not as expected.
-bool withLedges(const std::vector<unsigned char>& in, const std::vector<Ledge>& ledges, std::vector<unsigned char>& out)
+bool withConnections(const std::vector<unsigned char>& in, const std::vector<Connection>& cons, std::vector<unsigned char>& out)
 {
     if (in.size() < sizeof(dtMeshHeader)) return false;
     dtMeshHeader h;
@@ -126,7 +141,7 @@ bool withLedges(const std::vector<unsigned char>& in, const std::vector<Ledge>& 
     if (h.magic != DT_NAVMESH_MAGIC || h.version != DT_NAVMESH_VERSION || h.offMeshConCount != 0
         || h.offMeshBase != h.polyCount)
         return false;
-    const int n = static_cast<int>(ledges.size());
+    const int n = static_cast<int>(cons.size());
     const int headerSize = align4(sizeof(dtMeshHeader));
     const int vertsSize = align4(sizeof(float) * 3 * h.vertCount);
     const int polysSize = align4(sizeof(dtPoly) * h.polyCount);
@@ -156,8 +171,8 @@ bool withLedges(const std::vector<unsigned char>& in, const std::vector<Ledge>& 
     float* verts = reinterpret_cast<float*>(dst);
     std::memcpy(verts, src, sizeof(float) * 3 * h.vertCount);
     for (int i = 0; i < n; i++) {
-        std::memcpy(&verts[(h.vertCount + i * 2) * 3], ledges[i].start, sizeof(float) * 3);
-        std::memcpy(&verts[(h.vertCount + i * 2 + 1) * 3], ledges[i].end, sizeof(float) * 3);
+        std::memcpy(&verts[(h.vertCount + i * 2) * 3], cons[i].start, sizeof(float) * 3);
+        std::memcpy(&verts[(h.vertCount + i * 2 + 1) * 3], cons[i].end, sizeof(float) * 3);
     }
     src += vertsSize;
     dst += vertsOut;
@@ -168,24 +183,24 @@ bool withLedges(const std::vector<unsigned char>& in, const std::vector<Ledge>& 
         p.vertCount = 2;
         p.verts[0] = static_cast<unsigned short>(h.vertCount + i * 2);
         p.verts[1] = static_cast<unsigned short>(h.vertCount + i * 2 + 1);
-        p.flags = FLAG_LEDGE;
-        p.setArea(AREA_LEDGE);
+        p.flags = cons[i].flags;
+        p.setArea(cons[i].area);
         p.setType(DT_POLYTYPE_OFFMESH_CONNECTION);
     }
     src += polysSize + linksSize;   // links are rebuilt when the tile is added
     dst += polysOut + linksOut;
     std::memcpy(dst, src, detailSize + bvSize);
     dst += detailSize + bvSize;
-    dtOffMeshConnection* cons = reinterpret_cast<dtOffMeshConnection*>(dst);
+    dtOffMeshConnection* made = reinterpret_cast<dtOffMeshConnection*>(dst);
     for (int i = 0; i < n; i++) {
-        dtOffMeshConnection& c = cons[i];
-        std::memcpy(c.pos, ledges[i].start, sizeof(float) * 3);
-        std::memcpy(c.pos + 3, ledges[i].end, sizeof(float) * 3);
-        c.rad = 1.0f;
+        dtOffMeshConnection& c = made[i];
+        std::memcpy(c.pos, cons[i].start, sizeof(float) * 3);
+        std::memcpy(c.pos + 3, cons[i].end, sizeof(float) * 3);
+        c.rad = cons[i].rad;
         c.poly = static_cast<unsigned short>(h.polyCount + i);
-        c.flags = 0;                // one way: down
-        c.side = sideOf(ledges[i].end, h.bmin, h.bmax);
-        c.userId = static_cast<unsigned int>(i);
+        c.flags = 0;                // one way (a link both ways is two)
+        c.side = sideOf(cons[i].end, h.bmin, h.bmax);
+        c.userId = cons[i].userId;
     }
     return true;
 }
@@ -194,7 +209,7 @@ bool withLedges(const std::vector<unsigned char>& in, const std::vector<Ledge>& 
 // beyond it, out square to the edge, where the ground the mesh is on runs level
 // (no wall, no railing in the way) to an edge it falls away from, and comes down
 // LEDGE_MIN..LEDGE_MAX lower beside more of the car mesh.
-void findLedges(const dtNavMeshQuery& q, const dtMeshTile& tile, const Collision& world, std::vector<Ledge>& out)
+void findLedges(const dtNavMeshQuery& q, const dtMeshTile& tile, const Collision& world, std::vector<Connection>& out)
 {
     const dtQueryFilter filter = plainFilter();
     RayHit hit;
@@ -309,12 +324,12 @@ void findLedges(const dtNavMeshQuery& q, const dtMeshTile& tile, const Collision
                     break;
                 }
                 if (!ok) continue;
-                Ledge l;
+                Connection l;
                 const float start[3] = { bx, by, bz };
                 toRecast(start, l.start);
                 std::memcpy(l.end, landedRc, sizeof l.end);
                 bool near = false;
-                for (const Ledge& o : out)
+                for (const Connection& o : out)
                     if (dtVdist(o.start, l.start) < LEDGE_APART) {
                         near = true;
                         break;
@@ -338,6 +353,83 @@ MeshKind meshOf(PathKind k)
 float frand()
 {
     return static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+}
+
+// Each tile goes back into the mesh with its connections added, its data swapped
+// for the new in `data` (which the mesh points into). Returns the connections that went in.
+int addConnections(dtNavMesh& mesh, std::deque<std::vector<unsigned char>>& data,
+    const std::map<const dtMeshTile*, std::vector<Connection>>& cons)
+{
+    std::unordered_map<const unsigned char*, std::vector<unsigned char>*> owner;
+    for (auto& d : data) owner[d.data()] = &d;
+    int added = 0;
+    for (const auto& [tile, list] : cons) {
+        if (list.empty()) continue;
+        auto it = owner.find(tile->data);
+        if (it == owner.end()) continue;
+        std::vector<unsigned char>& was = *it->second;
+        std::vector<unsigned char> with;
+        if (!withConnections(was, list, with)) continue;
+        const dtTileRef ref = mesh.getTileRef(tile);
+        if (dtStatusFailed(mesh.removeTile(ref, nullptr, nullptr))) continue;
+        if (dtStatusSucceed(mesh.addTile(with.data(), static_cast<int>(with.size()), 0, ref, nullptr))) {
+            was.swap(with);
+            added += static_cast<int>(list.size());
+        } else {
+            mesh.addTile(was.data(), static_cast<int>(was.size()), 0, ref, nullptr);
+        }
+    }
+    return added;
+}
+
+// The mesh's nearest point to `p` within `reach` (Recast axes), on a polygon somebody
+// reaches if there is one, else whatever its flags (a search filter never finds a
+// polygon nobody reaches: the ground under an escalator, a plaza only it leads to). 0 when none.
+dtPolyRef nearestAny(const dtNavMesh& mesh, const dtNavMeshQuery& q, const float* p, const float* reach, float* out)
+{
+    int tx = 0, ty = 0;
+    mesh.calcTileLoc(p, &tx, &ty);
+    dtPolyRef best = 0;
+    float bestD = std::numeric_limits<float>::max();
+    bool bestReached = false;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            const dtMeshTile* tiles[8];
+            const int n = mesh.getTilesAt(tx + dx, ty + dy, tiles, 8);
+            for (int t = 0; t < n; t++) {
+                const dtMeshTile* tile = tiles[t];
+                const dtPolyRef base = mesh.getPolyRefBase(tile);
+                for (int i = 0; i < tile->header->polyCount; i++) {
+                    const dtPoly& poly = tile->polys[i];
+                    if (poly.getType() == DT_POLYTYPE_OFFMESH_CONNECTION) continue;
+                    float lo[3], hi[3];
+                    dtVcopy(lo, &tile->verts[poly.verts[0] * 3]);
+                    dtVcopy(hi, lo);
+                    for (int v = 1; v < poly.vertCount; v++) {
+                        dtVmin(lo, &tile->verts[poly.verts[v] * 3]);
+                        dtVmax(hi, &tile->verts[poly.verts[v] * 3]);
+                    }
+                    bool near = true;
+                    for (int k = 0; k < 3; k++) near = near && p[k] >= lo[k] - reach[k] && p[k] <= hi[k] + reach[k];
+                    if (!near) continue;
+                    float c[3];
+                    if (dtStatusFailed(q.closestPointOnPoly(base | static_cast<dtPolyRef>(i), p, c, nullptr))) continue;
+                    if (std::fabs(c[0] - p[0]) > reach[0] || std::fabs(c[1] - p[1]) > reach[1]
+                        || std::fabs(c[2] - p[2]) > reach[2])
+                        continue;
+                    const float d = dtVdistSqr(c, p);
+                    const bool reached = poly.flags != 0;
+                    if (reached > bestReached || (reached == bestReached && d < bestD)) {
+                        bestD = d;
+                        bestReached = reached;
+                        best = base | static_cast<dtPolyRef>(i);
+                        dtVcopy(out, c);
+                    }
+                }
+            }
+        }
+    }
+    return best;
 }
 
 } // namespace
@@ -375,7 +467,9 @@ int Pathfinder::load(const std::string& folder, std::vector<std::string>& log)
         log.push_back("no navmesh: " + folder + "/ has no .nav files");
         return 0;
     }
-    return loadFiles(files, log);
+    const int tiles = loadFiles(files, log);
+    loadLinks((fs::path(folder) / "links.txt").string(), log);
+    return tiles;
 }
 
 int Pathfinder::loadFiles(const std::vector<std::string>& files, std::vector<std::string>& log)
@@ -470,7 +564,7 @@ int Pathfinder::addLedges(const Collision& world, float& seconds)
         if (t && t->header) tiles.push_back(t);
     }
     // Found on every core, each with its own query; the mesh is only read.
-    std::vector<std::vector<Ledge>> found(tiles.size());
+    std::vector<std::vector<Connection>> found(tiles.size());
     std::atomic<size_t> next { 0 };
     auto work = [&]() {
         dtNavMeshQuery* q = dtAllocNavMeshQuery();
@@ -485,26 +579,168 @@ int Pathfinder::addLedges(const Collision& world, float& seconds)
     for (auto& t : pool) t.join();
 
     // Each tile with drops goes back in with them.
-    std::unordered_map<const unsigned char*, std::vector<unsigned char>*> owner;
-    for (auto& d : data_) owner[d.data()] = &d;
-    for (size_t i = 0; i < tiles.size(); i++) {
-        if (found[i].empty()) continue;
-        auto it = owner.find(tiles[i]->data);
-        if (it == owner.end()) continue;
-        std::vector<unsigned char>& data = *it->second;
-        std::vector<unsigned char> with;
-        if (!withLedges(data, found[i], with)) continue;
-        const dtTileRef ref = m.mesh->getTileRef(tiles[i]);
-        if (dtStatusFailed(m.mesh->removeTile(ref, nullptr, nullptr))) continue;
-        if (dtStatusSucceed(m.mesh->addTile(with.data(), static_cast<int>(with.size()), 0, ref, nullptr))) {
-            data.swap(with);
-            ledges_ += static_cast<int>(found[i].size());
-        } else {
-            m.mesh->addTile(data.data(), static_cast<int>(data.size()), 0, ref, nullptr);
-        }
-    }
+    std::map<const dtMeshTile*, std::vector<Connection>> byTile;
+    for (size_t i = 0; i < tiles.size(); i++)
+        if (!found[i].empty()) byTile[tiles[i]] = std::move(found[i]);
+    ledges_ = addConnections(*m.mesh, data_, byTile);
     seconds = std::chrono::duration<float>(std::chrono::steady_clock::now() - began).count();
     return ledges_;
+}
+
+int Pathfinder::loadLinks(const std::string& path, std::vector<std::string>& log)
+{
+    std::ifstream in(path);
+    if (!in) return 0;
+    const std::string name = std::filesystem::path(path).filename().string();
+    std::vector<std::vector<Point>> links;
+    std::string line;
+    for (int n = 1; std::getline(in, line); n++) {
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line.resize(hash);
+        std::istringstream words(line);
+        std::vector<float> v;
+        for (float f; words >> f;) v.push_back(f);
+        if (v.empty() && words.eof()) continue;    // blank, or only a comment
+        if (!words.eof() || v.size() < 6 || v.size() % 3) {
+            log.push_back("ERROR: " + name + " line " + std::to_string(n)
+                + ": a link is two or more points, \"x1 y1 z1  x2 y2 z2 ...\"");
+            continue;
+        }
+        std::vector<Point> way;
+        for (size_t i = 0; i < v.size(); i += 3) way.push_back(Point { v[i], v[i + 1], v[i + 2] });
+        links.push_back(std::move(way));
+    }
+    int opened = 0;
+    const int added = addLinks(links, opened, log);
+    if (!links.empty())
+        log.push_back(name + ": " + std::to_string(added) + " of " + std::to_string(links.size())
+            + " walking links (escalators)" + (added < static_cast<int>(links.size()) ? ", the rest off this navmesh" : "")
+            + "; " + std::to_string(opened) + " polygons only they reach opened");
+    return added;
+}
+
+int Pathfinder::addLinks(const std::vector<std::vector<Point>>& links, int& opened, std::vector<std::string>& log)
+{
+    opened = 0;
+    Mesh& m = meshes_[static_cast<int>(MeshKind::Ped)];
+    if (!m.mesh || links.empty()) return 0;
+    const dtNavMesh* nav = m.mesh;
+    struct End {
+        float at[3], ground[3];
+        dtPolyRef ref = 0;
+    };
+    std::vector<std::pair<End, End>> ends;
+    std::map<const dtMeshTile*, std::vector<Connection>> byTile;
+    for (size_t i = 0; i < links.size(); i++) {
+        if (links[i].size() < 2) continue;
+        End a, b;
+        toRecast(&links[i].front().x, a.at);
+        toRecast(&links[i].back().x, b.at);
+        a.ref = nearestAny(*nav, *m.query, a.at, LINK_REACH, a.ground);
+        b.ref = nearestAny(*nav, *m.query, b.at, LINK_REACH, b.ground);
+        auto baked = [&](const float* p) {
+            int tx = 0, ty = 0;
+            const dtMeshTile* tiles[8];
+            nav->calcTileLoc(p, &tx, &ty);
+            return nav->getTilesAt(tx, ty, tiles, 8) > 0;
+        };
+        if (!baked(a.at) || !baked(b.at)) continue;    // (outside what was baked: a map's own mesh, not the world's)
+        if (!a.ref || !b.ref) {
+            log.push_back("ERROR: link " + std::to_string(i + 1) + ": no walking mesh within 1.5 m of its "
+                + (a.ref ? "second" : "first") + " end");
+            continue;
+        }
+        // Its ends where given, on the ground; each way is a connection from the tile it
+        // starts in, reaching the mesh at both ends.
+        a.at[1] = a.ground[1];
+        b.at[1] = b.ground[1];
+        const float rad = std::max({ 1.0f, std::hypot(a.at[0] - a.ground[0], a.at[2] - a.ground[2]),
+                              std::hypot(b.at[0] - b.ground[0], b.at[2] - b.ground[2]) }) + 0.1f;
+        // Its way, end to end and back: the ends on the ground, the points between as given.
+        std::vector<float> fwd;
+        for (size_t k = 0; k < links[i].size(); k++) {
+            float rc[3];
+            toRecast(&links[i][k].x, rc);
+            fwd.insert(fwd.end(), rc, rc + 3);
+        }
+        std::copy(a.at, a.at + 3, fwd.begin());
+        std::copy(b.at, b.at + 3, fwd.end() - 3);
+        std::vector<float> back;
+        for (size_t k = fwd.size(); k >= 3; k -= 3) back.insert(back.end(), fwd.begin() + (k - 3), fwd.begin() + k);
+        for (int way = 0; way < 2; way++) {
+            const End& from = way ? b : a;
+            const End& to = way ? a : b;
+            const dtMeshTile* tile = nullptr;
+            const dtPoly* poly = nullptr;
+            nav->getTileAndPolyByRefUnsafe(from.ref, &tile, &poly);
+            Connection c;
+            dtVcopy(c.start, from.at);
+            dtVcopy(c.end, to.at);
+            c.flags = FLAG_WALK;
+            c.area = AREA_LINK;
+            c.rad = rad;
+            linkWays_.push_back(way ? back : fwd);
+            c.userId = static_cast<unsigned int>(linkWays_.size());
+            byTile[tile].push_back(c);
+        }
+        ends.emplace_back(a, b);
+    }
+    for (const auto& [tile, list] : byTile) {
+        if (tile->header->offMeshConCount) {
+            log.push_back("ERROR: links: a walking tile already has links; its are skipped");
+            return 0;
+        }
+    }
+    const int added = addConnections(*m.mesh, data_, byTile) / 2;
+
+    // What only a link reaches, the bake took for a roof (flag 0): open everything
+    // joined to a link's end that nothing else reaches.
+    std::vector<dtPolyRef> open;
+    std::unordered_set<dtPolyRef> seen, seeds;
+    for (const auto& [a, b] : ends) {
+        for (const End* e : { &a, &b }) {
+            float g[3];
+            const dtPolyRef ref = nearestAny(*nav, *m.query, e->at, LINK_REACH, g);
+            if (ref && seen.insert(ref).second) {
+                open.push_back(ref);
+                seeds.insert(ref);
+            }
+        }
+    }
+    while (!open.empty()) {
+        const dtPolyRef ref = open.back();
+        open.pop_back();
+        const dtMeshTile* tile = nullptr;
+        const dtPoly* poly = nullptr;
+        nav->getTileAndPolyByRefUnsafe(ref, &tile, &poly);
+        const bool closed = poly->flags == 0;
+        if (closed) {
+            m.mesh->setPolyFlags(ref, FLAG_WALK);
+            opened++;
+        }
+        if (!closed && !seeds.count(ref)) continue;     // reached already: so is all it joins
+        for (unsigned int l = poly->firstLink; l != DT_NULL_LINK; l = tile->links[l].next) {
+            const dtPolyRef next = tile->links[l].ref;
+            if (next && seen.insert(next).second) open.push_back(next);
+        }
+    }
+
+    // Each must now walk end to end.
+    for (size_t i = 0; i < ends.size(); i++) {
+        Point a, b;
+        toGta(ends[i].first.ground, &a.x);
+        toGta(ends[i].second.ground, &b.x);
+        for (int way = 0; way < 2; way++) {
+            const PathResult res = findNow(way ? b : a, way ? a : b);
+            if (res.status != PathStatus::Ok) {
+                log.push_back("ERROR: link " + std::to_string(i + 1) + " does not join its ends ("
+                    + (way ? "second to first" : "first to second") + ")");
+                break;
+            }
+        }
+    }
+    links_ += added;
+    return added;
 }
 
 void Pathfinder::start(int threads)
@@ -778,12 +1014,148 @@ PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
     return pick;
 }
 
+std::vector<Pathfinder::OnLink> Pathfinder::onLinks(const Point& at) const
+{
+    float p[3];
+    toRecast(&at.x, p);
+    std::vector<OnLink> out;
+    for (size_t w = 0; w < linkWays_.size(); w++) {
+        const std::vector<float>& way = linkWays_[w];
+        float total = 0.0f;
+        for (size_t k = 3; k < way.size(); k += 3) total += dtVdist(&way[k - 3], &way[k]);
+        OnLink best;
+        float bestD = LINK_ON, along = 0.0f;
+        for (size_t k = 3; k < way.size(); k += 3) {
+            const float* a = &way[k - 3];
+            const float* b = &way[k];
+            const float len = dtVdist(a, b);
+            const float dx = b[0] - a[0], dz = b[2] - a[2], flat = dx * dx + dz * dz;
+            const float t = flat > 1e-6f ? std::clamp(((p[0] - a[0]) * dx + (p[2] - a[2]) * dz) / flat, 0.0f, 1.0f) : 0.0f;
+            float on[3];
+            dtVlerp(on, a, b, t);
+            const float d = std::hypot(p[0] - on[0], p[2] - on[2]);
+            const float here = along + t * len;
+            if (d < bestD && std::fabs(p[1] - on[1]) < LINK_ON_DZ && here > LINK_ON_END && here < total - LINK_ON_END) {
+                bestD = d;
+                best.way = static_cast<int>(w);
+                best.next = static_cast<int>(k / 3);
+                dtVcopy(best.at, on);
+            }
+            along += len;
+        }
+        if (best.way >= 0) out.push_back(best);
+    }
+    return out;
+}
+
+// A walker partway along a link (up an escalator) is off the mesh, and so is a
+// target standing on one: the nearest mesh is the street beside it. The way leaves
+// along the link to one of its ends, or comes on at one and along to the target,
+// whichever makes the whole way shorter.
+bool Pathfinder::alongLinks(dtNavMeshQuery& q, const PathRequest& r, PathResult& res) const
+{
+    const std::vector<OnLink> from = onLinks(r.from), to = onLinks(r.to);
+    if (from.empty() && to.empty()) return false;
+    auto length = [](const std::vector<float>& pts) {
+        float l = 0.0f;
+        for (size_t k = 3; k < pts.size(); k += 3) l += dtVdist(&pts[k - 3], &pts[k]);
+        return l;
+    };
+    auto appendPts = [](std::vector<float>& pts, const float* p) {
+        if (pts.size() < 3 || dtVdistSqr(p, &pts[pts.size() - 3]) > 0.01f) pts.insert(pts.end(), p, p + 3);
+    };
+    float s[3], e[3];
+    toRecast(&r.from.x, s);
+    toRecast(&r.to.x, e);
+    // The ways off a link for the start (to its end), and on for the target (from its start).
+    struct Leg {
+        std::vector<float> pts;     // Recast axes, from the walker or to the target
+        int way = -1;
+        int next = 0;
+    };
+    std::vector<Leg> offs, ons;
+    for (const OnLink& o : from) {
+        const std::vector<float>& way = linkWays_[o.way];
+        Leg l;
+        l.way = o.way;
+        l.next = o.next;
+        appendPts(l.pts, s);
+        appendPts(l.pts, o.at);
+        for (size_t k = o.next * 3; k < way.size(); k += 3) appendPts(l.pts, &way[k]);
+        offs.push_back(std::move(l));
+    }
+    if (offs.empty()) offs.push_back(Leg { { s[0], s[1], s[2] } });
+    for (const OnLink& o : to) {
+        const std::vector<float>& way = linkWays_[o.way];
+        Leg l;
+        l.way = o.way;
+        l.next = o.next;
+        for (int k = 0; k < o.next; k++) appendPts(l.pts, &way[k * 3]);
+        appendPts(l.pts, o.at);
+        appendPts(l.pts, e);
+        ons.push_back(std::move(l));
+    }
+    if (ons.empty()) ons.push_back(Leg { { e[0], e[1], e[2] } });
+
+    std::vector<float> best;
+    float bestLen = std::numeric_limits<float>::max();
+    PathStatus bestStatus = PathStatus::NoPath;
+    auto better = [&](PathStatus st, float len) {
+        auto rank = [](PathStatus x) { return x == PathStatus::Ok ? 0 : x == PathStatus::Partial ? 1 : 2; };
+        return rank(st) < rank(bestStatus) || (rank(st) == rank(bestStatus) && len < bestLen);
+    };
+    for (const Leg& off : offs) {
+        for (const Leg& on : ons) {
+            std::vector<float> pts;
+            PathStatus st = PathStatus::Ok;
+            if (off.way >= 0 && off.way == on.way && off.next <= on.next) {
+                // Both on one way, the target further along it: straight along.
+                const std::vector<float>& way = linkWays_[off.way];
+                appendPts(pts, s);
+                for (int k = off.next; k < on.next; k++) appendPts(pts, &way[k * 3]);
+                appendPts(pts, e);
+            } else {
+                PathRequest mid = r;
+                toGta(&off.pts[off.pts.size() - 3], &mid.from.x);
+                toGta(&on.pts[0], &mid.to.x);
+                PathResult core = findMesh(q, mid);
+                st = core.status;
+                if (st != PathStatus::Ok && st != PathStatus::Partial) continue;
+                for (const float* p = off.pts.data(); p < off.pts.data() + off.pts.size(); p += 3) appendPts(pts, p);
+                for (const Point& g : core.points) {
+                    float rc[3];
+                    toRecast(&g.x, rc);
+                    appendPts(pts, rc);
+                }
+                if (st == PathStatus::Ok)
+                    for (const float* p = on.pts.data(); p < on.pts.data() + on.pts.size(); p += 3) appendPts(pts, p);
+            }
+            const float len = length(pts);
+            if (better(st, len)) {
+                best = std::move(pts);
+                bestLen = len;
+                bestStatus = st;
+            }
+        }
+    }
+    if (best.empty()) return false;     // nothing better than the mesh's own way
+    res.status = bestStatus;
+    res.points.clear();
+    for (size_t k = 0; k < best.size(); k += 3) {
+        Point g;
+        toGta(&best[k], &g.x);
+        res.points.push_back(g);
+    }
+    return true;
+}
+
 PathResult Pathfinder::findMesh(dtNavMeshQuery& q, const PathRequest& r) const
 {
     PathResult res;
     res.id = r.id;
     res.owner = r.owner;
     res.kind = r.kind;
+    if (r.kind == PathKind::Walk && !linkWays_.empty() && alongLinks(q, r, res)) return res;
     const float* reach = reachOf(meshOf(r.kind));
     const dtQueryFilter filter = r.kind == PathKind::OffRoad && r.road.ledges ? ledgeFilter() : plainFilter();
     float s[3], e[3], ns[3], ne[3];
@@ -818,28 +1190,60 @@ PathResult Pathfinder::findMesh(dtNavMeshQuery& q, const PathRequest& r) const
     float corners[MAX_CORNERS * 3];
     int ncorners = 0;
     unsigned char cornerFlags[MAX_CORNERS];
-    q.findStraightPath(ns, ne, polys, npolys, corners, cornerFlags, nullptr, &ncorners, MAX_CORNERS);
+    dtPolyRef cornerRefs[MAX_CORNERS];
+    q.findStraightPath(ns, ne, polys, npolys, corners, cornerFlags, cornerRefs, &ncorners, MAX_CORNERS);
     if (ncorners == 0) {
         res.status = PathStatus::NoPath;
         return res;
     }
 
+    // The corners, with the leg from each straight (off the mesh) or along the ground.
+    // A link's way is its own line, not the two points where its ends meet the mesh:
+    // the foot of an escalator, up its steps to the top, then on.
+    const dtNavMesh* nav = q.getAttachedNavMesh();
+    std::vector<float> cs;
+    std::vector<uint8_t> straight, ledges;
+    auto same = [&](const float* p) { return !cs.empty() && dtVdistSqr(p, &cs[cs.size() - 3]) < 1e-4f; };
+    for (int c = 0; c < ncorners; c++) {
+        if (!same(&corners[c * 3])) {   // (else a link's end: its way's last point stands for it)
+            cs.insert(cs.end(), &corners[c * 3], &corners[c * 3] + 3);
+            straight.push_back(0);
+            ledges.push_back(0);
+        }
+        const bool off = cornerFlags[c] & DT_STRAIGHTPATH_OFFMESH_CONNECTION;
+        const dtOffMeshConnection* con = off ? nav->getOffMeshConnectionByRef(cornerRefs[c]) : nullptr;
+        const dtMeshTile* tile = nullptr;
+        const dtPoly* poly = nullptr;
+        const bool link = con && dtStatusSucceed(nav->getTileAndPolyByRef(cornerRefs[c], &tile, &poly))
+            && poly->getArea() == AREA_LINK && con->userId >= 1 && con->userId <= linkWays_.size();
+        straight.back() = off ? 1 : 0;
+        ledges.back() = off && !link ? 1 : 0;
+        if (!link || c + 1 >= ncorners) continue;
+        const std::vector<float>& way = linkWays_[con->userId - 1];
+        for (size_t k = 0; k < way.size(); k += 3) {
+            if (same(&way[k])) continue;
+            cs.insert(cs.end(), way.begin() + k, way.begin() + k + 3);
+            straight.push_back(1);
+            ledges.push_back(0);
+        }
+    }
+
     // An NPC moves in straight lines, its height too, so a leg that crosses a level
-    // change (the foot of an escalator) needs points where the ground bends. Walk
-    // each leg in steps, find the corridor polygon under each step and read its
-    // height there; keep a step only where the ground leaves the straight line.
+    // change (the foot of a ramp) needs points where the ground bends. Walk each leg
+    // in steps, find the corridor polygon under each step and read its height there;
+    // keep a step only where the ground leaves the straight line.
     std::vector<float> pts;
     std::vector<bool> corner { true };
-    std::vector<uint8_t> ledgeAt { static_cast<uint8_t>(cornerFlags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION ? 1 : 0) };
-    pts.insert(pts.end(), corners, corners + 3);
+    std::vector<uint8_t> ledgeAt { ledges[0] };
+    pts.insert(pts.end(), cs.begin(), cs.begin() + 3);
     int at = 0;     // corridor polygon reached so far
-    for (int c = 1; c < ncorners; c++) {
-        const float* a = &corners[(c - 1) * 3];
-        const float* b = &corners[c * 3];
+    const int ncs = static_cast<int>(cs.size() / 3);
+    for (int c = 1; c < ncs; c++) {
+        const float* a = &cs[(c - 1) * 3];
+        const float* b = &cs[c * 3];
         const float len = std::sqrt((b[0] - a[0]) * (b[0] - a[0]) + (b[2] - a[2]) * (b[2] - a[2]));
-        // (A drop off a ledge is a straight line: no ground under it to follow.)
-        const bool ledge = cornerFlags[c - 1] & DT_STRAIGHTPATH_OFFMESH_CONNECTION;
-        const int steps = ledge ? 0 : static_cast<int>(len / SAMPLE_STEP);
+        // (A drop off a ledge, or a link, is a straight line: no ground under it to follow.)
+        const int steps = straight[c - 1] ? 0 : static_cast<int>(len / SAMPLE_STEP);
         for (int k = 1; k < steps; k++) {
             float p[3];
             dtVlerp(p, a, b, static_cast<float>(k) / steps);
@@ -847,7 +1251,7 @@ PathResult Pathfinder::findMesh(dtNavMeshQuery& q, const PathRequest& r) const
                 // (A drop off a ledge has a height anywhere along it.)
                 const dtMeshTile* tile = nullptr;
                 const dtPoly* poly = nullptr;
-                q.getAttachedNavMesh()->getTileAndPolyByRefUnsafe(polys[i], &tile, &poly);
+                nav->getTileAndPolyByRefUnsafe(polys[i], &tile, &poly);
                 if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION) continue;
                 float h;
                 if (dtStatusSucceed(q.getPolyHeight(polys[i], p, &h))) {
@@ -862,7 +1266,7 @@ PathResult Pathfinder::findMesh(dtNavMeshQuery& q, const PathRequest& r) const
         }
         pts.insert(pts.end(), b, b + 3);
         corner.push_back(true);
-        ledgeAt.push_back(cornerFlags[c] & DT_STRAIGHTPATH_OFFMESH_CONNECTION ? 1 : 0);
+        ledgeAt.push_back(ledges[c]);
     }
 
     // Keep every corner, and a sample only where the ground leaves the line from

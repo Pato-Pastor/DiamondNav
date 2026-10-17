@@ -128,6 +128,11 @@ native (or a few) that a script calls on an NPC it already made.
   taller than 45 m over the target instead of over them. Its own flight model
   (src/flying.cpp, tested in tests/test_flying.cpp): each model's speed, climb and turn
   rate, leaning into speed changes and banking into turns. Planes and boats are later.
+- 1.3.11: escalators. `navmesh/links.txt` lists ways the walking mesh lacks (an
+  escalator's steps are not in GTA's collision): each is walked both ways along its own
+  points, and opens what only it reaches (the bake took the Los Santos bank's plaza for a
+  roof). A walker or target partway along one goes along it. No rebake. Later:
+  reading every escalator from GTA's own files (2dfx) at bake time.
 
 ## 1.4: traffic
 
