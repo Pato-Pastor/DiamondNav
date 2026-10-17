@@ -51,6 +51,45 @@ public OnNavMoveEnd(npcid, reason)
 Licensed under the [Mozilla Public License 2.0](LICENSE). Works with open.mp
 v1.6.7.3218 (the 32-bit server, Linux or Windows).
 
+## How it works
+
+DiamondNav works in two halves: an offline bake on your PC, and a component that
+uses what was baked while the server runs.
+
+**Offline (`navtools/`).**
+- `dnav.py world` reads the map's collision from your GTA install (each model's
+  collision, placed where the map puts it), adds your own maps, and writes it out as
+  triangles.
+- `navbake` turns those triangles into navmeshes with Recast: a walking one, sized
+  for a ped, and a car one, sized for a car. It keeps only the floor GTA's own
+  pedestrian paths can reach, so roofs and counter tops don't count as walkable.
+- `dnav.py roads` turns GTA's traffic paths into a road graph. Each road has its
+  class, lanes and direction.
+- `dnav.py vehicles` runs GTA's vehicle physics on every model's handling data and
+  saves how each one accelerates, brakes and turns.
+- The car triangles are also kept as `world.col`, so drivers can see walls at run time.
+
+**On the server (the component).**
+- It loads `navmesh/` at start.
+- A script's request (walk, drive, chase) goes into a queue. Worker threads, each
+  with its own Detour query, run the search.
+  - Walking: A* across the navmesh, then the straightest line along the result, with
+    points added where the ground bends.
+  - Driving: A* over the road graph, offset into the right-hand lane, with a speed
+    for every point.
+- Results come back on the game thread, so no Pawn code ever runs off it. The
+  component then moves the NPC every tick:
+  - Walkers step from point to point.
+  - Cars are driven like cars: speed, braking and steering follow that model's
+    numbers, with rays against `world.col` for walls, ledges and the ground ahead.
+  - Helicopters fly their own flight model over the tops of whatever is ahead.
+- A chase plans again as its target moves, and keeps driving the old plan until
+  the new one is ready.
+- Two kinds of extra links are added on top of the meshes at start:
+  - drops off ledges, which only chases use;
+  - escalators from `navmesh/links.txt`, since their moving steps are not in GTA's
+    collision.
+
 ## Install
 
 Download the archive for your server from
@@ -376,24 +415,78 @@ another release, see [npcs/README.md](npcs/README.md).
 
 ## Building from source
 
-The server is 32-bit, so everything is built 32-bit. CMake fetches the
-dependencies (the open.mp SDK, pawn-natives, the Pawn headers, Recast/Detour).
+You only need this if you want to change DiamondNav or build it yourself. The
+[Releases](https://github.com/payrle-dev/DiamondNav/releases) archives are built
+the same way by CI.
+
+The open.mp server is 32-bit, so everything is built 32-bit. CMake (3.19 or newer)
+downloads what it needs while it configures: the open.mp SDK, pawn-natives, the Pawn
+headers and Recast/Detour. You need git, and an internet connection the first time.
+
+### Linux
+
+1. Install the tools. On Debian or Ubuntu:
+
+   ```sh
+   sudo dpkg --add-architecture i386 && sudo apt-get update
+   sudo apt-get install -y git g++-multilib cmake ninja-build python3 python3-numpy python3-pil libstdc++6:i386
+   ```
+
+2. Get the code and build it:
+
+   ```sh
+   git clone https://github.com/payrle-dev/DiamondNav
+   cd DiamondNav
+   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32
+   cmake --build build
+   ```
+
+   You get `build/DiamondNav.so` (the component), `build/navbake` and `build/navquery`.
+
+3. Run the tests (optional):
+
+   ```sh
+   ctest --test-dir build                    # the C++ tests
+   python3 tools/tests/test_tools.py build   # the Python tools, with a small bake
+   ```
+
+### Windows
+
+1. Install [Visual Studio 2022](https://visualstudio.microsoft.com/) (Community is
+   fine) with the **Desktop development with C++** workload and its **C++ Clang tools
+   for Windows** option, plus [Git](https://git-scm.com/) and
+   [Python 3.9+](https://www.python.org/) (then `python -m pip install numpy pillow`
+   for the tools).
+
+2. In a Developer PowerShell for VS 2022:
+
+   ```sh
+   git clone https://github.com/payrle-dev/DiamondNav
+   cd DiamondNav
+   cmake -S . -B build -A Win32 -T ClangCL
+   cmake --build build --config Release
+   ctest --test-dir build -C Release         # optional: the tests
+   ```
+
+   You get `build\Release\DiamondNav.dll`, `navbake.exe` and `navquery.exe`.
+
+### Putting it on your server
+
+Copy the component into your server's `components/` folder and
+`include/DiamondNav.inc` into `qawno/include/`. Put `navbake`, `navquery` and the
+`tools/` folder wherever you bake (see [Baking your world](#baking-your-world)).
+Or pack an archive laid out like a release:
 
 ```sh
-# Linux (needs g++-multilib, cmake, ninja)
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32
-cmake --build build
-ctest --test-dir build
-python3 tools/tests/test_tools.py build
-
-# Windows (Visual Studio 2022 with the Clang tools)
-cmake -S . -B build -A Win32 -T ClangCL
-cmake --build build --config Release
+python3 scripts/package.py build build/npcs dist linux    # or windows
 ```
 
+`package.py` also packs the improved NPC component, which is built on its own:
+build it first ([npcs/README.md](npcs/README.md) explains how).
+
 `tests/server/run.py` boots a real open.mp server with the component on a small
-made-up map and checks that an NPC walks round a wall and another drives a route.
-CI runs all of it on every push.
+made-up map. It checks that an NPC walks round a wall and that another drives a
+route. CI runs every test on every push.
 
 ## Good to know
 
