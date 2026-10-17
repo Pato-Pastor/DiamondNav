@@ -133,6 +133,17 @@ native (or a few) that a script calls on an NPC it already made.
   points, and opens what only it reaches (the bake took the Los Santos bank's plaza for a
   roof). A walker or target partway along one goes along it. No rebake. Later:
   reading every escalator from GTA's own files (2dfx) at bake time.
+- 1.3.12: chasers that don't overshoot your corners. A chaser goes no faster than lets
+  it brake, in the gap it keeps, to the target's own speed along its way, so it no
+  longer comes up behind at full speed; a target that turns off at a junction has none
+  of its speed along the chaser's way, so the chaser brakes for the corner too, down to
+  what its grip takes round it. A route is re-planned when where the target will be has
+  moved off it (it was re-planned 4 times a second), and a car backing up to turn round
+  goes on until the way forward is clear as far as its avoidance looks (it rocked forward
+  and back at a building's corner for up to 20 s). On the bench against 1.3.11, 8 runs
+  each: a getaway with hard 90-degree turns round the downtown grid 80 to 64 m behind on
+  average, with half the reversing and stuck 1.9 to 0.3 s; downtown zig-zag 116 to 109,
+  the hills 102 to 96, the freeway 138 to 145 (within its spread).
 
 ## 1.4: traffic
 

@@ -140,6 +140,12 @@ constexpr float NOSE_COL = 0.5f;            // ...or, with the world's collision
 constexpr float CHASE_AIM_CONE = 35.0f;     // degrees: the lead never aims further off the way to the target
 constexpr float CHASE_VEL_SMOOTH = 0.4f;    // each think's share of the target's velocity it goes by (the rest: before)
 constexpr float CHASE_PLAN_LEAD = 2.5f;     // s: a route is planned to where the target will be, at most this far ahead
+constexpr float FOLLOW_GAP = 6.0f;          // m: behind a moving target, it keeps this far back from it...
+constexpr float FOLLOW_REACT = 0.3f;        // s: ...and this long at its own speed (it sees the target 4 times a second)
+constexpr float FOLLOW_LANE = 2.5f;         // m: a target this near the line ahead of it is in its way
+constexpr float FOLLOW_TURNED = 45.0f;      // degrees: a target going this far off its own way has turned off it...
+constexpr float FOLLOW_NEAR = 50.0f;        // m: ...and, this near, is followed round the corner at...
+constexpr float FOLLOW_CORNER = 8.0f;       // m: ...the speed its grip holds on a turn this tight
 constexpr float CHASE_GAP_STEP = 1.0f;      // m: a railing in the way of a drop: a gap is looked for this far apart...
 constexpr int CHASE_GAP_TRIES = 12;         // ...this many times either side
 constexpr float CHASE_DROP_RUNUP = 8.0f;    // m: a gap is driven through square on from this far back
@@ -279,6 +285,9 @@ struct Mover {
     Vector3 stuckAt {};                 // ...from here
     float nudge = 0.0f;                 // s it edges forward through what is in its way (boxed in)
     Vector3 tvel {};                    // the target's velocity, smoothed over the last few thinks
+    Vector3 quarryPos {};               // where the target was at the last think...
+    Vector2 quarryVel {};               // ...and its velocity then, m/s (not smoothed)
+    TimePoint quarryAt {};
     bool seen = false;                  // tvel has a value
     bool walled = false;                // drive(): a wall is in the way and there is no way round it
     float wallHold = 0.0f;              // s left before a straight run is tried again
@@ -1446,6 +1455,39 @@ public:
             m.cum[i] = m.cum[i - 1] + glm::distance(Vector2(m.points[i - 1]), Vector2(m.points[i]));
     }
 
+    // Chasing a moving target: no faster than lets the car brake, in the gap it keeps,
+    // to the target's own speed along its way (the target may brake as hard). A target
+    // ahead that turns off at a corner has none of its speed along the car's way: the
+    // car brakes for the corner too, down to what its grip takes round it. (Driving at
+    // the point ahead of it, it came up behind at full speed, and a target braking and
+    // turning off at a junction was overshot by tens of metres.)
+    float followSpeed(const Mover& m, const Vector3& pos, TimePoint now, float brake) const
+    {
+        if (m.quarryAt == TimePoint {}) return 1e9f;
+        const float since = std::clamp(std::chrono::duration<float>(now - m.quarryAt).count(), 0.0f, 0.5f);
+        const float tspeed = glm::length(m.quarryVel);
+        if (tspeed < CHASE_STILL) return 1e9f;
+        // (On another level, over a bridge or under it, it is not in the way.)
+        if (std::fabs(m.quarryPos.z - pos.z) > CHASE_DIRECT_DZ) return 1e9f;
+        const Vector2 rel = Vector2(m.quarryPos) + m.quarryVel * since - Vector2(pos);
+        const Vector2 fwd = forwardOf(m.heading);
+        const float ahead = glm::dot(rel, fwd), side = std::fabs(fwd.x * rel.y - fwd.y * rel.x);
+        const float along = std::max(0.0f, glm::dot(m.quarryVel, fwd));
+        const float react = m.v * FOLLOW_REACT;
+        if (ahead > 0.0f && side < FOLLOW_LANE)
+            return std::sqrt(along * along + 2.0f * brake * std::max(0.0f, ahead - FOLLOW_GAP - react));
+        const bool turned = along < tspeed * std::cos(glm::radians(FOLLOW_TURNED));
+        // (Off to one side of it, as chasers spread out: it may come up beside it, no
+        // further.)
+        if (!turned && ahead > 0.0f && glm::length(rel) < FOLLOW_NEAR)
+            return std::sqrt(along * along + 2.0f * brake * ahead);
+        if (turned && ahead > -FOLLOW_LANE && glm::length(rel) < FOLLOW_NEAR) {
+            const float corner = std::max(along, std::sqrt(m.car.grip * std::max(FOLLOW_CORNER, m.car.radius)));
+            return std::sqrt(corner * corner + 2.0f * brake * std::max(0.0f, ahead - react));
+        }
+        return 1e9f;
+    }
+
     static float wrap180(float a)
     {
         while (a > 180.0f) a -= 360.0f;
@@ -1608,6 +1650,7 @@ public:
             if (!m.chase || !(m.chaseFlags & CHASE_RAM))
                 target = std::min(target, std::sqrt(m.match * m.match
                     + 2.0f * brakePlan * std::max(0.0f, remaining - ARRIVE * 0.5f)));
+            if (m.chase && !(m.chaseFlags & CHASE_RAM)) target = std::min(target, followSpeed(m, pos, now, brakePlan));
             ahead2 = Vector3(aim);
 
             // Backing up. A car can't turn on the spot: a point behind it and near, or
@@ -1700,11 +1743,15 @@ public:
             // Backed up far enough: from here it can swing round to the aim going forward
             // without meeting a wall (a pillar by its nose). Backing up only till the aim
             // was in front sent it forward into the same post, and back, and forward.
+            // (Looked at as far as avoid() looks pulling away: swung round and on toward
+            // the aim. Only as far as facing it, a building's corner just past a turn in
+            // the way was out of sight, and pulling away avoid() swerved off from it the
+            // other way, undoing the turn, back and forth for as long as it was let.)
             auto forwardClear = [&]() {
                 if (!world_.loaded()) return true;
                 const float v = TURN_MIN_SPEED;
                 return wallHit(me, Vector2(pos), m.heading, error, glm::degrees(v / turnR), v,
-                           glm::radians(abs2) * turnR / v + WALL_STEP, groundZ) < 0.0f;
+                           std::max(glm::radians(abs2) * turnR / v + WALL_STEP, AVOID_HORIZON_MIN), groundZ) < 0.0f;
             };
             if (abs2 < REVERSE_DONE) m.turning = false;
             if (m.backOff) {
@@ -2196,6 +2243,9 @@ public:
         const dnav::Point targetGround { tpos.x, tpos.y, tpos.z - FOOT_Z };
 
         const bool ram = m.chaseFlags & CHASE_RAM;
+        m.quarryPos = tpos;
+        m.quarryVel = Vector2(tvel) * VELOCITY_UNIT;
+        m.quarryAt = now;
         // Its velocity, smoothed: one sharp turn of the wheel does not swing every
         // chaser after it at once.
         m.tvel = m.seen ? m.tvel + (tvel - m.tvel) * CHASE_VEL_SMOOTH : tvel;
@@ -2341,8 +2391,13 @@ public:
             return;
         }
 
-        // Follow a path; plan one when there is none or the target has moved off it.
-        const float moved = glm::distance(tpos, m.planGoal);
+        // Follow a path; plan one when there is none or the target has moved off it: when
+        // where it will be is no longer near where the plan was aimed. (Against where it
+        // is, a plan aimed ahead of a fast target was stale the moment it came back, and
+        // was re-planned 4 times a second.)
+        const float lead = std::clamp(dist / std::max(m.v, 15.0f), 0.0f, CHASE_PLAN_LEAD);
+        Vector3 goal = tpos + tvel * (VELOCITY_UNIT * lead);
+        const float moved = std::min(glm::distance(goal, m.planGoal), glm::distance(tpos, m.planGoal));
         const bool stale = m.direct || m.idle || m.points.empty()
             || moved > std::max(CHASE_REPLAN, dist * CHASE_REPLAN_SHARE) || now - m.planned > CHASE_REPLAN_AFTER;
         // (Not on a ledge's run-up: a plan from part way along it would turn back to its start.)
@@ -2361,8 +2416,6 @@ public:
         how.hasHeading = true;
         how.heading = m.rolling ? m.heading : car->getRotation().ToEuler().z;
         how.ledges = !(m.chaseFlags & CHASE_NO_DROP);
-        const float lead = std::clamp(dist / std::max(m.v, 15.0f), 0.0f, CHASE_PLAN_LEAD);
-        Vector3 goal = tpos + tvel * (VELOCITY_UNIT * lead);
         dnav::Point goalGround { goal.x, goal.y, targetGround.z };
         if (!roads || finder.roads().nearest(goal.x, goal.y, targetGround.z, CHASE_ON_ROAD, how) < 0) {
             goal = tpos;
