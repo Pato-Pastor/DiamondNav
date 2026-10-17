@@ -71,10 +71,23 @@ struct RouteOptions {
     bool anyWay = false;
     bool hasHeading = false;
     float heading = 0.0f;       // GTA's, degrees (0 north, turning left)
+    float speed = 0.0f;         // m/s with the heading: what turning round costs (turnRoundCost)
     // The car navmesh (OffRoad): may drive off a ledge where Pathfinder::addLedges
     // found a drop to more of the mesh below (a chase).
     bool ledges = false;
+    // Nodes not to start from (a road the car has no way onto from where it is).
+    const std::vector<uint32_t>* notFrom = nullptr;
 };
+
+// What turning round costs a car going at `speed` (m/s), in metres of driving: braking
+// to a stop, turning, and getting back up to speed, against carrying on at that speed.
+// At a crawl, about a U-turn's length; at 30 m/s, about 300 m.
+inline float turnRoundCost(float speed)
+{
+    constexpr float TURN_TIME = 3.5f, BRAKE = 7.0f, ACCEL = 3.5f, LEAST = 35.0f;
+    const float c = TURN_TIME * speed + speed * speed * (0.5f / BRAKE + 0.5f / ACCEL);
+    return c > LEAST ? c : LEAST;
+}
 
 enum class RouteStatus : int {
     Ok = 0,
@@ -92,7 +105,7 @@ public:
     static constexpr float SEARCH_REACH = 60.0f;
     static constexpr float EDGE_REACH = 400.0f;    // ...or a stretch of road starting this near
     static constexpr float AGAINST_COST = 1.3f;    // anyWay: a stretch against the traffic costs this much more
-    static constexpr float TURN_ROUND = 35.0f;     // m: a start behind the car costs this much more
+    static constexpr float START_BACK = -0.17f;    // a first stretch heading back more than 100 degrees turns the car round
 
     bool load(const std::string& path, std::string& error);
     bool loaded() const { return !nodes_.empty(); }
@@ -112,10 +125,12 @@ public:
     // `wider` widens every road by that much either side.
     bool deckAt(float x, float y, float z, float& out, float wider = 0.0f) const;
 
+    // `startNode`, when given, gets the node the route starts from.
     RouteStatus route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
-        std::vector<RoutePoint>& out) const;
+        std::vector<RoutePoint>& out, uint32_t* startNode = nullptr) const;
 
     const std::vector<RoadNode>& nodes() const { return nodes_; }
+    const std::vector<RoadEdge>& edges() const { return edges_; }
     // The class of the road from node `from` along `e`.
     RoadClass classOf(uint32_t from, const RoadEdge& e) const;
 

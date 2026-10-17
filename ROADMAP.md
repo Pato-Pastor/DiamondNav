@@ -92,6 +92,21 @@ native (or a few) that a script calls on an NPC it already made.
   way when wedged twice, stop swerving off their road at speed for a building past
   the next corner, and turn round when the target goes behind them instead of driving
   on. `navquery path ... --car --ledges` shows a chase's route.
+- 1.3.7: chases that keep going (from a 12-scenario bench on the Los Santos bake, with a
+  recorded getaway car so every build chases the same target). A moving car weighs a
+  U-turn's real cost (stopping, turning, getting back up to speed) against carrying on,
+  swings round forward where there is room, keeps its speed when it is given a new
+  destination or starts a chase, and a replan no longer doubles back round a post it
+  just passed. Road routes no longer start on a road the car cannot reach (below a
+  terrace or behind a wall): the way onto the first road crosses the car mesh and is
+  checked against world.col. Three-point turns use the whole street, a car scraping a
+  kerb or post can still steer away from it, a car boxed in by a post far ahead takes
+  the course that gets furthest, a car braking from speed to turn round still avoids
+  the wall it slides at, and cars no longer rock forward and back at a pillar. Slopes:
+  the car's height follows the ground just ahead (no more sinking into hills or
+  floating over dips), steps and steep ramps no longer read as walls, and a car past an
+  edge falls instead of driving on level. `navquery route ... --heading h --speed m/s`
+  shows a moving car's route; `navquery road x y` the nearest road node.
 
 ## 1.4: traffic
 

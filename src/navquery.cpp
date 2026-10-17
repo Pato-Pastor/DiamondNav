@@ -4,9 +4,11 @@
 //   navquery <folder> path  x y z  x y z [--car] [--ledges]
 //                                                 a walking (or driving) path on the navmesh; --ledges
 //                                                 lets a car drive off ledges (needs world.col)
-//   navquery <folder> route x y z  x y z [--emergency] [--boats]
-//                                                 a driving route on the road graph
+//   navquery <folder> route x y z  x y z [--emergency] [--boats] [--heading h --speed m/s]
+//                                                 a driving route on the road graph (as a chase plans
+//                                                 it with a heading: any way, from the road ahead)
 //   navquery <folder> near  x y z [reach] [--car] the nearest walkable (or drivable) point
+//   navquery <folder> road  x y                   the nearest road node in the plan, at any height, and its class
 //
 // Prints one point per line ("x y z", plus the speed factor for a route) and exits
 // 0 when the search found the whole way, 2 for a partial path, 1 otherwise.
@@ -42,8 +44,9 @@ int usage()
     std::fprintf(stderr,
         "usage: navquery <folder> info\n"
         "       navquery <folder> path  x y z  x y z [--car] [--ledges]\n"
-        "       navquery <folder> route x y z  x y z [--emergency] [--boats]\n"
-        "       navquery <folder> near  x y z [reach] [--car]\n");
+        "       navquery <folder> route x y z  x y z [--emergency] [--boats] [--heading h --speed m/s]\n"
+        "       navquery <folder> near  x y z [reach] [--car]\n"
+        "       navquery <folder> road  x y\n");
     return 1;
 }
 
@@ -87,6 +90,23 @@ int main(int argc, char** argv)
         std::printf("%.2f %.2f %.2f\n", hit.x, hit.y, hit.z);
         return 0;
     }
+    if (cmd == "road") {
+        float p[2];
+        if (!points(argc, argv, 3, 2, p)) return usage();
+        const RoadNode* best = nullptr;
+        float bestD = 0.0f;
+        for (const auto& n : finder.roads().nodes()) {
+            const float d = (n.x - p[0]) * (n.x - p[0]) + (n.y - p[1]) * (n.y - p[1]);
+            if (!best || d < bestD) { best = &n; bestD = d; }
+        }
+        if (!best) return 1;
+        const auto& roads = finder.roads();
+        const uint32_t id = (uint32_t)(best - roads.nodes().data());
+        static const char* names[] = { "highway", "main", "street", "minor", "service", "offroad" };
+        std::printf("%.2f %.2f %.2f %s\n", best->x, best->y, best->z,
+            best->edgeCount ? names[(int)roads.classOf(id, roads.edges()[best->firstEdge])] : "dead end");
+        return 0;
+    }
     if (cmd != "path" && cmd != "route") return usage();
     float v[6];
     if (!points(argc, argv, 3, 6, v)) return usage();
@@ -99,9 +119,22 @@ int main(int argc, char** argv)
         for (int i = 9; i < argc; i++) {
             if (!std::strcmp(argv[i], "--emergency")) r.road.emergency = true;
             else if (!std::strcmp(argv[i], "--boats")) r.road.boats = true;
+            else if (!std::strcmp(argv[i], "--heading") && i + 1 < argc) {
+                r.road.hasHeading = true;
+                r.road.anyWay = true;
+                r.road.heading = std::strtof(argv[++i], nullptr);
+            } else if (!std::strcmp(argv[i], "--speed") && i + 1 < argc) r.road.speed = std::strtof(argv[++i], nullptr);
             else return usage();
         }
-        res = finder.findRoute(r);
+        // With a heading, as a chase plans: the way onto the first road checked against
+        // the world's collision when the folder has it.
+        Collision world;
+        std::string error;
+        if (r.road.hasHeading && world.load(std::string(argv[1]) + "/world.col", error)) {
+            float secs = 0.0f;
+            finder.addLedges(world, secs);
+        }
+        res = finder.findRouteNow(r);
     } else {
         bool car = false, ledges = false;
         for (int i = 9; i < argc; i++) {

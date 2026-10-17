@@ -233,7 +233,7 @@ bool RoadGraph::deckAt(float x, float y, float z, float& out, float wider) const
 }
 
 RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
-    std::vector<RoutePoint>& out) const
+    std::vector<RoutePoint>& out, uint32_t* startNode) const
 {
     out.clear();
     if (nodes_.empty()) return RouteStatus::NotLoaded;
@@ -296,10 +296,14 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
     // With a heading, every node near the start is a way in, each costing the way to
     // it plus a turn round if it is behind the car: a car going one way takes the
     // road ahead of it, not the nearest node at its back.
+    // (And its way on from that node: from one ahead, back past the car is a turn round
+    // too, as is on past the car from one behind it, which it turned round to reach.)
     std::vector<std::pair<uint32_t, float>> starts;
+    std::unordered_map<uint32_t, float> startDir;      // +1 reached going forward, -1 turned round
+    const float turn = turnRoundCost(opt.speed);
+    const float h0 = opt.heading * 0.01745329f;
+    const float fwdX = -std::sin(h0), fwdY = std::cos(h0);
     if (opt.hasHeading) {
-        const float h = opt.heading * 0.01745329f;
-        const float fwdX = -std::sin(h), fwdY = std::cos(h);
         const int r = static_cast<int>(std::ceil(SEARCH_REACH / CELL));
         const int cx = cellOf(fx), cy = cellOf(fy);
         for (int dx = -r; dx <= r; dx++)
@@ -309,10 +313,13 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
                 for (uint32_t i : it->second) {
                     const RoadNode& n = nodes_[i];
                     if (!usable(n, opt) || !hasExit(i, opt) || std::fabs(n.z - fz) > 6.0f) continue;
+                    if (opt.notFrom && std::find(opt.notFrom->begin(), opt.notFrom->end(), i) != opt.notFrom->end())
+                        continue;
                     const float ox = n.x - fx, oy = n.y - fy, d = len2d(ox, oy);
                     if (d > SEARCH_REACH) continue;
                     const bool behind = d > 6.0f && ox * fwdX + oy * fwdY < 0.0f;
-                    starts.push_back({ i, d + (behind ? TURN_ROUND : 0.0f) });
+                    starts.push_back({ i, d + (behind ? turn : 0.0f) });
+                    startDir[i] = behind ? -1.0f : 1.0f;
                 }
             }
     }
@@ -352,8 +359,13 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
             const RoadEdge& e = edges_[i];
             if (!drivable(e, opt) || closed[e.to] || !usable(nodes_[e.to], opt)) continue;
             const RoadNode& b = nodes_[e.to];
-            const float c = cost[cur] + (e.lanes ? 1.0f : AGAINST_COST)
-                * std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
+            const float len = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
+            float c = cost[cur] + (e.lanes ? 1.0f : AGAINST_COST) * len;
+            if (prev[cur] < 0 && len > 1e-3f) {
+                auto it = startDir.find(cur);
+                if (it != startDir.end() && ((b.x - a.x) * fwdX + (b.y - a.y) * fwdY) / len * it->second < START_BACK)
+                    c += turn;
+            }
             if (c < cost[e.to]) {
                 cost[e.to] = c;
                 prev[e.to] = static_cast<int>(cur);
@@ -366,6 +378,7 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
     std::vector<uint32_t> chain;
     for (int i = g; i >= 0; i = prev[i]) chain.push_back(static_cast<uint32_t>(i));
     std::reverse(chain.begin(), chain.end());
+    if (startNode) *startNode = chain.front();
 
     // The end node can fall short of the destination (the destination is between it
     // and the next node on): go on to that next node, and the last leg is cut level

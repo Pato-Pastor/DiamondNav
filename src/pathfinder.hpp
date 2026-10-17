@@ -64,6 +64,7 @@ struct PathResult {
     std::vector<RoadClass> classes; // Drive, OffRoad: the road each point is on
     std::vector<uint8_t> junctions; // Drive: 1 where the point is in a junction
     std::vector<uint8_t> ledges;    // OffRoad: 1 where a drop off a ledge starts (its run-up, then off)
+    size_t joined = 0;              // Drive: the points before the first road one, the way onto it across the car mesh
 };
 
 class Pathfinder {
@@ -110,9 +111,14 @@ public:
 
     // The search itself; any thread with its own query on the right mesh.
     PathResult find(dtNavMeshQuery& q, const PathRequest& r) const;
-    PathResult findRoute(const PathRequest& r) const;
+    PathResult findMesh(dtNavMeshQuery& q, const PathRequest& r) const;
+    // With the car mesh's query, a route whose first point the car can't drive straight
+    // to (a road below the wall it is up against) starts with the way there across it.
+    PathResult findRoute(const PathRequest& r, dtNavMeshQuery* car = nullptr) const;
     // The same on the calling thread (navbake's route check, navquery).
     PathResult findNow(const Point& from, const Point& to, MeshKind k = MeshKind::Ped, bool ledges = false) const;
+    // A road route on the calling thread, joined onto across the car mesh as a chase's is.
+    PathResult findRouteNow(const PathRequest& r) const { return findRoute(r, mesh(MeshKind::Car).query); }
 
 private:
     struct Mesh {
@@ -123,10 +129,18 @@ private:
     const Mesh& mesh(MeshKind k) const { return meshes_[static_cast<int>(k)]; }
     int addMesh(MeshKind k, std::vector<std::pair<std::string, NavFile>>& files, std::vector<std::string>& log);
     static void offRoadSpeeds(PathResult& res);
+    static bool lineClearOn(const dtNavMeshQuery& q, const float* reach, const Point& from, const Point& to);
     void work();
+
+    bool joinRoute(dtNavMeshQuery& car, const PathRequest& r, PathResult& res) const;
+    // The car's way along `pts` (ground points) meets no wall in the world's collision
+    // at bumper height, but for the legs starting where `drops` is set (true without
+    // the collision).
+    bool clearOfWalls(const std::vector<Point>& pts, const std::vector<uint8_t>& drops) const;
 
     RoadGraph roads_;
     int ledges_ = 0;
+    std::atomic<const Collision*> world_ { nullptr };   // addLedges': for checking ways onto roads
     Mesh meshes_[MESH_KINDS];
     std::deque<std::vector<unsigned char>> data_;   // tile data the meshes point into
 

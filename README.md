@@ -72,7 +72,7 @@ loaded:
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
 [nav] loaded world.col: <faces> faces
-[nav] DiamondNav 1.3.6: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.7: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -201,6 +201,8 @@ navtools/navquery navmesh info
 navtools/navquery navmesh path  1700 -2490 13.5  1650 -2300 13.5
 navtools/navquery navmesh route 1700 -2490 13.5  1480 -1730 13.5
 navtools/navquery navmesh path  2350 -1819 12.5  2350 -1852 0.7 --car --ledges
+navtools/navquery navmesh route 1480 -1730 13.5  1700 -1440 13.5 --heading 90 --speed 20
+navtools/navquery navmesh road  1480 -1730
 python navtools/dnav.py preview check.png --bake bake/world --roads navmesh/roads.dnr
 ```
 

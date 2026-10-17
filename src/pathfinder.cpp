@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <filesystem>
 #include <map>
 #include <unordered_map>
@@ -35,6 +36,16 @@ constexpr float CORNER_MIN = 0.35f;     // the slowest, as a share of cruising s
 // only a search that asks for them crosses.
 constexpr unsigned short FLAG_LEDGE = 2;
 constexpr unsigned char AREA_LEDGE = 1;
+constexpr float MOMENTUM_FROM = 6.0f;   // m/s: slower than this, the way from where it is
+constexpr float MOMENTUM_AHEAD = 1.5f;  // s: the ways from this far on along its heading, and twice it...
+constexpr float MOMENTUM_MIN = 10.0f;   // m: ...no nearer...
+constexpr float MOMENTUM_MAX = 60.0f;   // ...nor further
+constexpr float MOMENTUM_LEG = 8.0f;    // m: a way turns the car round when a leg starting this near...
+constexpr float MOMENTUM_STUB = 0.5f;   // (and longer than this)
+constexpr float MOMENTUM_BACK = -0.17f; // ...heads back more than 100 degrees from its heading
+constexpr float JOIN_NEAR = 6.0f;       // m: the way onto a route's first point gets this near it
+constexpr int JOIN_TRIES = 4;           // roads tried to start from when there is no way onto one
+constexpr float JOIN_BUMPER = 0.6f;     // m over the ground: the walls the way onto a road may not meet
 constexpr float LEDGE_COST = 3.0f;      // a drop costs as much as driving three times its length
 // Ledges: where the car mesh stops at an edge with more of it below.
 constexpr float LEDGE_SPACING = 4.0f;   // a drop every this much along an edge of the mesh
@@ -444,6 +455,7 @@ int Pathfinder::addLedges(const Collision& world, float& seconds)
     const auto began = std::chrono::steady_clock::now();
     seconds = 0.0f;
     Mesh& m = meshes_[static_cast<int>(MeshKind::Car)];
+    if (world.loaded()) world_ = &world;
     if (!m.mesh || !world.loaded() || ledges_) return 0;
     const dtNavMesh* cmesh = m.mesh;
     std::vector<const dtMeshTile*> tiles;
@@ -576,7 +588,7 @@ void Pathfinder::work()
             queue_.pop_front();
         }
         dtNavMeshQuery* mq = q[static_cast<int>(meshOf(r.kind))];
-        PathResult res = r.kind == PathKind::Drive || !mq ? findRoute(r) : find(*mq, r);
+        PathResult res = r.kind == PathKind::Drive || !mq ? findRoute(r, q[static_cast<int>(MeshKind::Car)]) : find(*mq, r);
         std::lock_guard<std::mutex> lock(mutex_);
         done_.push_back(std::move(res));
     }
@@ -584,24 +596,154 @@ void Pathfinder::work()
         if (qq) dtFreeNavMeshQuery(qq);
 }
 
-PathResult Pathfinder::findRoute(const PathRequest& r) const
+PathResult Pathfinder::findRoute(const PathRequest& r, dtNavMeshQuery* car) const
 {
-    PathResult res;
-    res.id = r.id;
-    res.owner = r.owner;
-    res.kind = r.kind;
-    std::vector<RoutePoint> pts;
-    res.status = static_cast<PathStatus>(roads_.route(r.from.x, r.from.y, r.from.z, r.to.x, r.to.y, r.to.z, r.road, pts));
-    for (const auto& p : pts) {
-        res.points.push_back(Point { p.x, p.y, p.z });
-        res.speeds.push_back(p.speed);
-        res.classes.push_back(p.cls);
-        res.junctions.push_back(p.junction ? 1 : 0);
+    // The road graph knows nothing of walls: the road it starts on can be one the car
+    // has no straight way onto (below the terrace it is on, up a ramp past its kerb). A
+    // car that drove at it would sit nose to the wall: it goes round to it across the
+    // car mesh, and where even that meets a wall, the route starts from another road.
+    std::vector<uint32_t> notFrom;
+    PathResult first;
+    for (int attempt = 0; attempt < JOIN_TRIES; attempt++) {
+        PathResult res;
+        res.id = r.id;
+        res.owner = r.owner;
+        res.kind = r.kind;
+        RouteOptions opt = r.road;
+        opt.notFrom = &notFrom;
+        std::vector<RoutePoint> pts;
+        uint32_t start = 0;
+        res.status = static_cast<PathStatus>(roads_.route(r.from.x, r.from.y, r.from.z, r.to.x, r.to.y, r.to.z, opt, pts, &start));
+        for (const auto& p : pts) {
+            res.points.push_back(Point { p.x, p.y, p.z });
+            res.speeds.push_back(p.speed);
+            res.classes.push_back(p.cls);
+            res.junctions.push_back(p.junction ? 1 : 0);
+        }
+        if (res.status != PathStatus::Ok || res.points.empty() || !car || r.road.boats)
+            return attempt == 0 ? res : first;
+        if (joinRoute(*car, r, res)) {
+            // (The way onto the road: from the car to the road's first point.)
+            std::vector<Point> way { r.from };
+            std::vector<uint8_t> drops { 0 };
+            for (size_t i = 0; i <= res.joined && i < res.points.size(); i++) {
+                way.push_back(res.points[i]);
+                drops.push_back(i < res.ledges.size() ? res.ledges[i] : 0);
+            }
+            if (clearOfWalls(way, drops)) return res;
+        }
+        if (attempt == 0) first = std::move(res);
+        notFrom.push_back(start);
     }
-    return res;
+    return first;
 }
 
+// Prepends the way from r.from onto res's first point across the car mesh, when the
+// car can't drive straight to it. False when the car is off the mesh or the mesh has
+// no way there (res is then as it was).
+bool Pathfinder::joinRoute(dtNavMeshQuery& car, const PathRequest& r, PathResult& res) const
+{
+    const float* reach = reachOf(MeshKind::Car);
+    const Point& first = res.points.front();
+    float s[3], ns[3];
+    dtPolyRef ref = 0;
+    toRecast(&r.from.x, s);
+    const dtQueryFilter filter = plainFilter();
+    car.findNearestPoly(s, reach, &filter, &ref, ns);
+    if (!ref) return false;
+    if (lineClearOn(car, reach, r.from, first)) return true;
+    PathRequest on = r;
+    on.kind = PathKind::OffRoad;
+    on.to = first;
+    PathResult way = findMesh(car, on);
+    if (way.status != PathStatus::Ok || way.points.size() < 2
+        || std::hypot(way.points.back().x - first.x, way.points.back().y - first.y) > JOIN_NEAR)
+        return false;
+    way.points.pop_back();
+    way.speeds.pop_back();
+    way.classes.pop_back();
+    way.junctions.pop_back();
+    way.ledges.pop_back();
+    res.ledges.assign(res.points.size(), 0);
+    res.points.insert(res.points.begin(), way.points.begin(), way.points.end());
+    res.speeds.insert(res.speeds.begin(), way.speeds.begin(), way.speeds.end());
+    res.classes.insert(res.classes.begin(), way.classes.begin(), way.classes.end());
+    res.junctions.insert(res.junctions.begin(), way.junctions.begin(), way.junctions.end());
+    res.ledges.insert(res.ledges.begin(), way.ledges.begin(), way.ledges.end());
+    res.joined = way.points.size();
+    return true;
+}
+
+bool Pathfinder::clearOfWalls(const std::vector<Point>& pts, const std::vector<uint8_t>& drops) const
+{
+    const Collision* world = world_;
+    if (!world) return true;
+    RayHit hit;
+    for (size_t i = 1; i < pts.size(); i++) {
+        if (i - 1 < drops.size() && drops[i - 1]) continue;     // a drop off a ledge is a fall, not a drive
+        const Vec3 a { pts[i - 1].x, pts[i - 1].y, pts[i - 1].z + JOIN_BUMPER };
+        const Vec3 b { pts[i].x, pts[i].y, pts[i].z + JOIN_BUMPER };
+        if (world->wall(a, b, hit)) return false;
+    }
+    return true;
+}
+
+// Across the car mesh with a heading and a speed (a chase): the mesh knows neither,
+// so the way from where the car is, which may start by turning it round, is weighed
+// against the way from a little further on along its heading, which keeps its
+// momentum: a turn round costs what stopping, turning and getting back up to speed
+// costs at that speed (turnRoundCost).
 PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
+{
+    PathResult here = findMesh(q, r);
+    if (r.kind != PathKind::OffRoad || !r.road.hasHeading || r.road.speed < MOMENTUM_FROM) return here;
+    const float h = r.road.heading * 0.01745329f, fx = -std::sin(h), fy = std::cos(h);
+    const float turn = turnRoundCost(r.road.speed);
+    auto cost = [&](const PathResult& p) {
+        if (p.status != PathStatus::Ok && p.status != PathStatus::Partial) return std::numeric_limits<float>::infinity();
+        float len = 0.0f, turns = 0.0f;
+        for (size_t i = 1; i < p.points.size(); i++) {
+            const float dx = p.points[i].x - p.points[i - 1].x, dy = p.points[i].y - p.points[i - 1].y;
+            const float l = std::hypot(dx, dy);
+            // (A leg of its first few metres heading back the way the car came: a turn
+            // round. Its first leg alone missed a way that doubles back round a post
+            // and then runs sideways.)
+            if (len < MOMENTUM_LEG && l > MOMENTUM_STUB && (dx * fx + dy * fy) / l < MOMENTUM_BACK) turns = turn;
+            len += l;
+        }
+        // (Short of the end, the rest as the crow flies.)
+        if (!p.points.empty()) len += std::hypot(r.to.x - p.points.back().x, r.to.y - p.points.back().y);
+        return len + turns;
+    };
+    const float costHere = cost(here);
+    if (costHere < turn * 0.5f) return here;    // nowhere near worth weighing
+    float best = costHere;
+    PathResult pick = std::move(here);
+    for (float secs : { MOMENTUM_AHEAD, MOMENTUM_AHEAD * 2.0f }) {
+        const float d = std::clamp(r.road.speed * secs, MOMENTUM_MIN, MOMENTUM_MAX);
+        Point ahead { r.from.x + fx * d, r.from.y + fy * d, r.from.z };
+        if (!lineClearOn(q, reachOf(MeshKind::Car), r.from, ahead)) continue;
+        PathRequest on = r;
+        on.from = ahead;
+        PathResult there = findMesh(q, on);
+        if (there.status != PathStatus::Ok && there.status != PathStatus::Partial) continue;
+        // From the car, on to there, then that way.
+        there.points.insert(there.points.begin(), r.from);
+        there.speeds.insert(there.speeds.begin(), 1.0f);
+        there.classes.insert(there.classes.begin(), RoadClass::OffRoad);
+        there.junctions.insert(there.junctions.begin(), 0);
+        there.ledges.insert(there.ledges.begin(), 0);
+        if (there.speeds.size() > 1) there.speeds[1] = 1.0f;
+        const float c = cost(there);
+        if (c < best) {
+            best = c;
+            pick = std::move(there);
+        }
+    }
+    return pick;
+}
+
+PathResult Pathfinder::findMesh(dtNavMeshQuery& q, const PathRequest& r) const
 {
     PathResult res;
     res.id = r.id;
@@ -796,14 +938,18 @@ bool Pathfinder::groundAt(float x, float y, float z, float reach, float& out, Me
 bool Pathfinder::lineClear(const Point& from, const Point& to, MeshKind k) const
 {
     dtNavMeshQuery* q = mesh(k).query;
-    if (!q) return false;
+    return q && lineClearOn(*q, reachOf(k), from, to);
+}
+
+bool Pathfinder::lineClearOn(const dtNavMeshQuery& q, const float* reach, const Point& from, const Point& to)
+{
     const dtQueryFilter filter = plainFilter();
     float s[3], e[3], ns[3], ne[3];
     toRecast(&from.x, s);
     toRecast(&to.x, e);
     dtPolyRef sref = 0, eref = 0;
-    q->findNearestPoly(s, reachOf(k), &filter, &sref, ns);
-    q->findNearestPoly(e, reachOf(k), &filter, &eref, ne);
+    q.findNearestPoly(s, reach, &filter, &sref, ns);
+    q.findNearestPoly(e, reach, &filter, &eref, ne);
     if (!sref || !eref) return false;
     // The ray runs along the mesh's surface; t stays FLT_MAX when it reaches the
     // end without leaving the mesh. It aims at the end itself, not the nearest point
@@ -811,7 +957,7 @@ bool Pathfinder::lineClear(const Point& from, const Point& to, MeshKind k) const
     float t = 0.0f, normal[3];
     dtPolyRef path[256];
     int npath = 0;
-    if (dtStatusFailed(q->raycast(sref, ns, e, &filter, &t, normal, path, &npath, 256))) return false;
+    if (dtStatusFailed(q.raycast(sref, ns, e, &filter, &t, normal, path, &npath, 256))) return false;
     if (t < 1.0f || npath == 0) return false;
     // It reached the end's x and z; the end's polygon must be on the same floor.
     return path[npath - 1] == eref;
