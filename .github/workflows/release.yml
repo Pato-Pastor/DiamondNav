@@ -1,7 +1,8 @@
 name: Release
 
 # Push a tag vX.Y.Z (matching CMakeLists.txt's VERSION) to publish a release with
-# the Linux and Windows archives.
+# the Linux and Windows archives. Publishing a release on GitHub with a new tag works
+# too: the archives are added to it.
 
 on:
   push:
@@ -33,4 +34,9 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "DiamondNav $GITHUB_REF_NAME" --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "DiamondNav $GITHUB_REF_NAME" --generate-notes
+          fi
