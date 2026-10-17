@@ -11,6 +11,7 @@
 #pragma once
 
 #include <functional>
+#include <unordered_map>
 
 #include "collision.hpp"
 
@@ -52,6 +53,10 @@ struct FlyGoal {
     bool face = false;          // turned to faceHeading (at a target) rather than the way it flies
     float faceHeading = 0.0f;   // GTA's, degrees
     float arrive = 3.0f;        // m: there once this near, slow and at its height
+    // How high it would rather not go (a z; very low: no limit). It flies round anything
+    // that would take it over this (a tower beside the street it follows), planning a
+    // way round, and climbs over only what it cannot get round.
+    float ceiling = -1e9f;
 };
 
 // A helicopter in the air.
@@ -65,7 +70,16 @@ struct Flight {
     float floor = -1e9f;        // the lowest it may fly here: the tops under and ahead, and the clearance
     float planIn = 0.0f;        // s until the floor is looked at again
     float want = 0.0f;          // m/s: the speed it is going for (Nav_GetDriveInfo)
+    Vec3 push {};               // away from anything solid close beside it
     bool down = false;          // on the ground (landed)
+    // Its way round what is above its goal's ceiling: where it is heading for now (the
+    // goal, or a corner on the way), how far it is to the goal that way, and when it
+    // plans again.
+    Vec3 aim {};
+    float aimLeft = 0.0f;
+    bool aiming = false;        // aim is a corner on the way (else straight at the goal)
+    float routeIn = 0.0f;
+    std::unordered_map<long long, float> tops;  // the tops it has looked at, by grid cell
 };
 
 // One step of dt seconds toward g. Returns true once it is there: hovering at g.at

@@ -154,6 +154,61 @@ static void overhead()
     CHECK(near > 20 * 55);
 }
 
+// A wall of towers 150 m tall with one gap: under a ceiling it goes round through the
+// gap, never over; without one it goes over.
+static float towers(float x, float y)
+{
+    if (x >= 100 && x <= 130 && (y < -20 || y > 20) && y > -400 && y < 400) return 150.0f;
+    return 0.0f;
+}
+
+static bool inTowers(const Vec3& p)
+{
+    return p.z < towers(p.x, p.y);
+}
+
+static void roundTheTowers()
+{
+    const HeliSpec s = HeliSpec::of(497);
+    FlyWorld w;
+    w.top = towers;
+    w.ray = [](const Vec3& a, const Vec3& b, float& t) {
+        const float len = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) + (b.z - a.z) * (b.z - a.z));
+        const int n = std::max(1, static_cast<int>(len / 0.5f));
+        for (int i = 1; i <= n; i++) {
+            const float k = static_cast<float>(i) / n;
+            if (inTowers({ a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k, a.z + (b.z - a.z) * k })) {
+                t = k;
+                return true;
+            }
+        }
+        return false;
+    };
+    for (int capped = 0; capped < 2; capped++) {
+        Flight f;
+        f.pos = { 0, 150, 30 };
+        FlyGoal g;
+        g.at = { 250, 150, 30 };
+        if (capped) g.ceiling = 60.0f;
+        bool there = false, wentIn = false;
+        float highest = 0.0f, gapY = 1e9f;
+        for (int i = 0; i < 20 * 120 && !there; i++) {
+            there = fly(f, g, s, w, 0.05f);
+            wentIn = wentIn || inTowers(f.pos);
+            highest = std::max(highest, f.pos.z);
+            if (f.pos.x >= 100 && f.pos.x <= 130) gapY = std::min(gapY, std::fabs(f.pos.y));
+        }
+        CHECK(there);
+        CHECK(!wentIn);
+        if (capped) {
+            CHECK(highest < 60.0f);
+            CHECK(gapY < 20.0f);
+        } else {
+            CHECK(highest > 150.0f);
+        }
+    }
+}
+
 static void basics()
 {
     CHECK(isHelicopter(497) && isHelicopter(487) && isHelicopter(425));
@@ -170,6 +225,7 @@ int main()
     overTheTower();
     landings();
     overhead();
+    roundTheTowers();
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);
         return 1;

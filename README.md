@@ -308,9 +308,12 @@ short of anything solid ahead. It slows in time to stop and hovers at `z`, or, w
 `NAV_FLY_LAND`, comes down a glide slope and sets down on the ground or roof there.
 It flies like a helicopter: nose down to speed up, nose up to slow, banked into
 turns, at each model's own speed (a Maverick about 180 km/h, a Hunter 215, a
-Leviathan 135). `Nav_Chase` with an NPC flying a helicopter circles over the target
-instead of driving after it (22 m out, 28 m up, slowly round it, looking down at
-it), keeping up with a car flat out (`NAV_CHASE_OVERHEAD`). The flight is DiamondNav's
+Leviathan 135). `Nav_Chase` with an NPC flying a helicopter keeps over the target instead of
+driving after it (`NAV_CHASE_OVERHEAD`): 15 m behind and 28 m up while it moves,
+circling over it when it stops, looking at it. It stays below 45 m over the target
+and plans its way round anything taller (a grid search over the tops in
+`world.col`, so it flies down the streets between towers and keeps its rotor 10 m
+off walls), climbing over only what it cannot get round. The flight is DiamondNav's
 own: no NPC_Move, the helicopter's position, rotation and velocity are set every tick
 and go out in its driver sync. Without `world.col` it keeps only to the height it is
 given.

@@ -147,9 +147,11 @@ native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, Flo
 // target come up either side of it instead of in a line; NAV_CHASE_RAM drives
 // straight into it. It re-plans as the target moves, without pausing. The NPC must
 // be the driver. Ends with NAV_END_LOST when the target leaves or changes world.
-// An NPC flying a helicopter circles over the target instead (22 m out, 28 m up,
-// slowly round, looking down at it), keeping up with it and high enough to clear what
-// is under it (NAV_CHASE_OVERHEAD; carZ and flags do not apply).
+// An NPC flying a helicopter keeps over the target instead (NAV_CHASE_OVERHEAD;
+// carZ and flags do not apply): 15 m behind and 28 m up while it moves, circling
+// over it when it stops, always looking at it. It stays below 45 m over the target,
+// flying round anything taller (down the streets between towers), and climbs over
+// only what it cannot get round.
 // What the NPCs do in the chase (shoot, give up) is the script's: Nav_GetChaseInfo
 // says how far the target is. It drives in NAV_STYLE_PURSUIT unless the NPC has a
 // style of its own; speed, if above 0, caps it (as Nav_DriveTo's).

@@ -196,6 +196,7 @@ constexpr float HELI_TRAIL_TO = 3.0f;       // ...and slower than this, stopped
 constexpr float HELI_CHASE_RADIUS = 22.0f;  // m out from them
 constexpr float HELI_CHASE_HEIGHT = 28.0f;  // m over them
 constexpr float HELI_CHASE_RATE = 9.0f;     // degrees a second round them
+constexpr float HELI_CHASE_CEILING = 45.0f; // m over them: it flies round anything that would take it higher
 constexpr float HELI_DT_MAX = 0.1f;         // s: a longer gap between ticks flies as this
 constexpr float HELI_MOVED = 3.0f;          // m: something else moved the helicopter this far: it flies on from there
 constexpr float HELI_SEA = 0.0f;            // the sea's surface (no face in the collision)
@@ -2137,6 +2138,7 @@ public:
                     f.angle, true, dt);
             }
             f.goal.speed = speed;
+            f.goal.ceiling = tpos.z + HELI_CHASE_CEILING;
         }
         if (dt <= 0.0f) return;
         const bool there = dnav::fly(f.flight, f.goal, f.spec, flyWorld(), dt);
