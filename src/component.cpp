@@ -224,6 +224,7 @@ struct Mover {
     float heading = 0.0f;               // degrees, GTA's
     float yawRate = 0.0f;               // degrees a second it is turning at
     bool rolling = false;               // speed and heading are the car's own
+    bool walkOn = false;                // a walker given a new place while on its way: it walks on meanwhile
     bool ground = false;                // read the height off the car mesh as it goes
     TimePoint lastDrive {};
     Vector3 lastPos {};                 // the NPC's position at the last drive()
@@ -1222,7 +1223,13 @@ public:
                 how.speed = m.v;
             }
         }
-        end(npcid, END_STOPPED, !keep);
+        // A walker already on its way walks on while the new way is found (a follower sent
+        // after someone every second would otherwise stop dead each time), then turns
+        // onto it from where it has got to.
+        const bool walkOn = !driving(kind) && was != movers_.end() && !driving(was->second.kind)
+            && !was->second.request && was->second.next < was->second.points.size();
+        end(npcid, END_STOPPED, !keep && !walkOn);
+        m.walkOn = walkOn;
         const Vector3 goal = driving(kind) ? to - Vector3(0.0f, 0.0f, carZ) : to - Vector3(0.0f, 0.0f, FOOT_Z);
         const int id = finder.request(amx, dnav::Point { from.x, from.y, from.z }, dnav::Point { goal.x, goal.y, goal.z },
             kind, how);
@@ -1313,7 +1320,8 @@ public:
             return;
         }
         for (const auto& p : r.points) m.points.push_back(Vector3(p.x, p.y, p.z + FOOT_Z));
-        m.next = 0;
+        // (Walking on, the first point is where it was when the way was asked for: behind it.)
+        m.next = m.walkOn && m.points.size() > 1 ? 1 : 0;
         step(npcid, m);
     }
 

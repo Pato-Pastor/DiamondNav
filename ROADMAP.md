@@ -116,6 +116,11 @@ native (or a few) that a script calls on an NPC it already made.
   never ends in the water. On the bench against 1.3.7: Ocean Docks 169 to 115 m behind
   with no car stuck or in the water, the freeway 173 to 138, downtown zig-zag 140 to 104,
   the beach 50 to 41.
+- 1.3.9: a walker given a new place while on its way walks on while the new way is
+  found, then turns onto it from where it has got to, instead of stopping dead each
+  time (a follower sent after someone every half second used to stutter). On a bench of
+  a follower after a target changing pace round the Idlewood alleys: 8.9 m behind on
+  average (was 10.4), at most 24 m (was 31).
 
 ## 1.4: traffic
 

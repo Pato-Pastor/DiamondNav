@@ -24,7 +24,7 @@
 #endif
 #define _DiamondNav_included
 
-#define DIAMONDNAV_INCLUDE_VERSION      (10308)     // 1.3.8
+#define DIAMONDNAV_INCLUDE_VERSION      (10309)     // 1.3.9
 
 // ── Results ──────────────────────────────────────────────────────────────────
 
@@ -117,7 +117,8 @@ native Nav_GetPendingCount();
 
 // Walks (or runs, or sprints) an NPC to a point along the navmesh. moveType is
 // open.mp's NPC_MOVE_TYPE_WALK, _JOG or _SPRINT; speed as NPC_Move takes it.
-// Returns false when the NPC does not exist or the search queue is full.
+// Returns false when the NPC does not exist or the search queue is full. Called again
+// while it walks (following someone), it walks on until the new way is found.
 native bool:Nav_WalkTo(npcid, Float:x, Float:y, Float:z, moveType = 1, Float:speed = -1.0);
 
 // Drives an NPC's car to a point along the roads, in its lane. The NPC must be the

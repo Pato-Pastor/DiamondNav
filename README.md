@@ -72,7 +72,7 @@ loaded:
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
 [nav] loaded world.col: <faces> faces
-[nav] DiamondNav 1.3.8: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.9: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
