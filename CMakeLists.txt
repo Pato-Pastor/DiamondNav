@@ -17,7 +17,7 @@
 # and Recast/Detour v1.6.0.
 
 cmake_minimum_required(VERSION 3.19)
-project(DiamondNav LANGUAGES C CXX VERSION 1.3.9)
+project(DiamondNav LANGUAGES C CXX VERSION 1.3.10)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,7 +62,7 @@ target_include_directories(dnav_detour PUBLIC ${recast_SOURCE_DIR}/Detour/Includ
 target_compile_definitions(dnav_detour PUBLIC DT_POLYREF64=1)
 
 # What the baker and the component share: the .nav file, the settings and the search.
-add_library(dnav_common STATIC src/navfile.cpp src/pathfinder.cpp src/roads.cpp src/driving.cpp src/collision.cpp)
+add_library(dnav_common STATIC src/navfile.cpp src/pathfinder.cpp src/roads.cpp src/driving.cpp src/collision.cpp src/flying.cpp)
 target_include_directories(dnav_common PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(dnav_common PUBLIC dnav_detour Threads::Threads)
@@ -112,4 +112,7 @@ if(DNAV_TESTS)
     add_executable(dnav_collision_tests tests/test_collision.cpp)
     target_link_libraries(dnav_collision_tests PRIVATE dnav_common)
     add_test(NAME collision COMMAND dnav_collision_tests)
+    add_executable(dnav_flying_tests tests/test_flying.cpp)
+    target_link_libraries(dnav_flying_tests PRIVATE dnav_common)
+    add_test(NAME flying COMMAND dnav_flying_tests)
 endif()

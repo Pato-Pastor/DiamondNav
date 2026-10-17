@@ -11,8 +11,9 @@
 // and searches paths on its own threads, so a search never holds up the server.
 //
 // Two ways to use it:
-//   - Let it move the NPC: Nav_WalkTo / Nav_DriveTo / Nav_Chase, then OnNavMoveEnd
-//     says how it ended. It follows the path point by point with open.mp's NPC_Move.
+//   - Let it move the NPC: Nav_WalkTo / Nav_DriveTo / Nav_FlyTo / Nav_Chase, then
+//     OnNavMoveEnd says how it ended. It follows the path point by point with
+//     open.mp's NPC_Move (a helicopter flies on its own, with no path).
 //   - Ask for the points and move the NPC yourself: Nav_RequestPath /
 //     Nav_RequestRoute, then OnNavPathResult hands over the points.
 //
@@ -24,7 +25,7 @@
 #endif
 #define _DiamondNav_included
 
-#define DIAMONDNAV_INCLUDE_VERSION      (10309)     // 1.3.9
+#define DIAMONDNAV_INCLUDE_VERSION      (10310)     // 1.3.10
 
 // ── Results ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,10 @@
 #define NAV_CHASE_PLANNING      (3)     // waiting on its first route
 #define NAV_CHASE_EDGE          (4)     // the target is below: driving at the edge to go off it
 #define NAV_CHASE_AIRBORNE      (5)     // off the edge, falling
+#define NAV_CHASE_OVERHEAD      (6)     // a helicopter, circling over the target
+
+// Nav_FlyTo's flags.
+#define NAV_FLY_LAND            (1)     // set down on the ground (or a roof) there, instead of hovering
 
 // Which navmesh: where peds walk, or where a car fits.
 #define NAV_MESH_PED            (0)
@@ -142,20 +147,35 @@ native bool:Nav_DriveTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, Flo
 // target come up either side of it instead of in a line; NAV_CHASE_RAM drives
 // straight into it. It re-plans as the target moves, without pausing. The NPC must
 // be the driver. Ends with NAV_END_LOST when the target leaves or changes world.
+// An NPC flying a helicopter circles over the target instead (22 m out, 28 m up,
+// slowly round, looking down at it), keeping up with it and high enough to clear what
+// is under it (NAV_CHASE_OVERHEAD; carZ and flags do not apply).
 // What the NPCs do in the chase (shoot, give up) is the script's: Nav_GetChaseInfo
 // says how far the target is. It drives in NAV_STYLE_PURSUIT unless the NPC has a
 // style of its own; speed, if above 0, caps it (as Nav_DriveTo's).
 native bool:Nav_Chase(npcid, targetid, Float:speed = 0.0, Float:carZ = 0.0, flags = 0);
 
 // A chaser: how far its target is (m) and what it is doing (NAV_CHASE_BESIDE ..
-// NAV_CHASE_AIRBORNE). False when the NPC is not chasing.
+// NAV_CHASE_OVERHEAD). False when the NPC is not chasing.
 native bool:Nav_GetChaseInfo(npcid, &Float:distance, &mode);
 
-// Stops a Nav_WalkTo, Nav_DriveTo or Nav_Chase where the NPC is (OnNavMoveEnd:
-// NAV_END_STOPPED).
+// Flies an NPC's helicopter to a point: up from wherever it is, straight there high
+// enough to clear everything under and ahead of it (20 m over the tops of buildings,
+// trees and hills, and over the sea; world.col says where they are, and without it
+// it only keeps to z), slowing to stop there and hovering at z, or, with
+// NAV_FLY_LAND, setting down on the ground or roof at (x, y). It leans as it flies:
+// nose down to speed up, nose up to slow, banked into turns. The NPC must be the
+// pilot of a helicopter (not an RC one). speed, if above 0, caps it in
+// NPC_MOVE_TYPE_DRIVE's units (1.0 is 10 m/s; a Maverick tops out at 5.0). Called
+// again while it flies, it turns for the new point without stopping. OnNavMoveEnd
+// says NAV_END_ARRIVED once it hovers there or is down; stopped, it hangs where it is.
+native bool:Nav_FlyTo(npcid, Float:x, Float:y, Float:z, Float:speed = 0.0, flags = 0);
+
+// Stops a Nav_WalkTo, Nav_DriveTo, Nav_FlyTo or Nav_Chase where the NPC is
+// (OnNavMoveEnd: NAV_END_STOPPED).
 native bool:Nav_Stop(npcid);
 
-// Whether a Nav_WalkTo, Nav_DriveTo or Nav_Chase is under way (or searching).
+// Whether a Nav_WalkTo, Nav_DriveTo, Nav_FlyTo or Nav_Chase is under way (or searching).
 native bool:Nav_IsMoving(npcid);
 
 // ── How cars drive ───────────────────────────────────────────────────────────
@@ -195,7 +215,8 @@ native Nav_GetVehicleModelCount();
 
 // A driver under way: its speed, the speed it is going for (the road, the next
 // corner, the end), the class of road it is on and that road's limit. False when the
-// NPC is not driving with DiamondNav.
+// NPC is not driving with DiamondNav. For a helicopter: its speed, the speed it is
+// going for and its top speed as the limit.
 native bool:Nav_GetDriveInfo(npcid, &Float:speedKmh, &Float:wantKmh, &roadClass, &Float:limitKmh, &bool:reversing);
 
 // ── Searching ────────────────────────────────────────────────────────────────
@@ -244,5 +265,5 @@ native bool:Nav_GetNearestRoadPoint(Float:x, Float:y, Float:z, &Float:outX, &Flo
 // Nav_GetPathPointSpeed) here; they are gone after the callback returns.
 forward OnNavPathResult(requestid, status, points);
 
-// A Nav_WalkTo, Nav_DriveTo or Nav_Chase ended (reason: NAV_END_*).
+// A Nav_WalkTo, Nav_DriveTo, Nav_FlyTo or Nav_Chase ended (reason: NAV_END_*).
 forward OnNavMoveEnd(npcid, reason);

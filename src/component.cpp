@@ -25,6 +25,7 @@
 
 #include "collision.hpp"
 #include "driving.hpp"
+#include "flying.hpp"
 #include "pathfinder.hpp"
 
 #ifndef DNAV_VERSION_MAJOR
@@ -184,7 +185,20 @@ constexpr int CHASE_RAM = 1;            // drive into the target: no slowing at 
 constexpr int CHASE_NO_DROP = 2;        // never off an edge after it: the roads round instead
 // Nav_GetChaseInfo's modes.
 enum ChaseMode : int { CHASE_BESIDE = 0, CHASE_STRAIGHT = 1, CHASE_ROUTE = 2, CHASE_PLANNING = 3, CHASE_EDGE = 4,
-    CHASE_AIRBORNE = 5 };
+    CHASE_AIRBORNE = 5, CHASE_OVERHEAD = 6 };
+// Nav_FlyTo's flags.
+constexpr int FLY_LAND = 1;             // down onto the ground there, instead of hovering
+// A helicopter chasing someone follows over their trail while they move, and circles
+// over them when they stop, looking down at them.
+constexpr float HELI_TRAIL = 15.0f;         // m behind them, on the move
+constexpr float HELI_TRAIL_FROM = 5.0f;     // m/s: faster than this, they are on the move...
+constexpr float HELI_TRAIL_TO = 3.0f;       // ...and slower than this, stopped
+constexpr float HELI_CHASE_RADIUS = 22.0f;  // m out from them
+constexpr float HELI_CHASE_HEIGHT = 28.0f;  // m over them
+constexpr float HELI_CHASE_RATE = 9.0f;     // degrees a second round them
+constexpr float HELI_DT_MAX = 0.1f;         // s: a longer gap between ticks flies as this
+constexpr float HELI_MOVED = 3.0f;          // m: something else moved the helicopter this far: it flies on from there
+constexpr float HELI_SEA = 0.0f;            // the sea's surface (no face in the collision)
 
 bool driving(dnav::PathKind k)
 {
@@ -320,6 +334,20 @@ struct Traffic {
     Shape shape;
 };
 
+// An NPC flying a helicopter (Nav_FlyTo, or Nav_Chase in one).
+struct Flyer {
+    void* owner = nullptr;              // the script told when it ends
+    int quarry = -1;                    // Nav_Chase: who it flies over (-1: Nav_FlyTo)
+    dnav::FlyGoal goal;
+    dnav::Flight flight;
+    dnav::HeliSpec spec;
+    float angle = 0.0f;                 // round its quarry, degrees
+    float quarryDist = 0.0f;
+    bool trailing = false;              // following its quarry's trail (else circling it)
+    Vector3 placed {};                  // where it was put last
+    TimePoint last {};
+};
+
 class DiamondNav final : public IComponent, public PawnEventHandler, public CoreEventHandler, public NPCEventHandler {
 public:
     PROVIDE_UID(0xc7e6abc6cb842c2c);
@@ -438,10 +466,19 @@ public:
             if (r.owner == amx) r.owner = nullptr;
         for (auto& [id, m] : movers_)
             if (m.owner == amx) m.owner = nullptr;
+        for (auto& [id, f] : flyers_)
+            if (f.owner == amx) f.owner = nullptr;
     }
 
     void onTick(Microseconds, TimePoint now) override
     {
+        // Helicopters fly (ids first: arriving or losing the target ends a flight).
+        thinking_.clear();
+        for (const auto& [id, f] : flyers_) thinking_.push_back(id);
+        for (int id : thinking_) {
+            auto it = flyers_.find(id);
+            if (it != flyers_.end()) flyStep(id, it->second, now);
+        }
         // Chasers look at their targets (ids first: thinking can end a chase).
         thinking_.clear();
         for (const auto& [id, m] : movers_)
@@ -1196,6 +1233,7 @@ public:
         if (driving(kind)) {
             IVehicle* car = npc->getVehicle();
             if (!car || npc->getVehicleSeat() != 0) return false;   // only a driver drives
+            if (dnav::isHelicopter(car->getModel())) return false;  // Nav_FlyTo
             if (carZ <= 0.0f) carZ = rideHeight(car->getModel());
             from = car->getPosition() - Vector3(0.0f, 0.0f, carZ);
         } else {
@@ -1250,6 +1288,17 @@ public:
     // Ends npc's walk or drive, if it has one, and tells its script why.
     void end(int npcid, MoveEnd why, bool stopNpc)
     {
+        auto fl = flyers_.find(npcid);
+        if (fl != flyers_.end()) {
+            void* owner = fl->second.owner;
+            flyers_.erase(fl);
+            // Stopped, it hangs where it is (or sits where it landed).
+            if (stopNpc && npcs_) {
+                if (INPC* npc = npcs_->get(npcid)) npc->setVelocity(Vector3(0.0f), false);
+            }
+            tell(owner, npcid, why);
+            return;
+        }
         auto it = movers_.find(npcid);
         if (it == movers_.end()) return;
         Mover m = std::move(it->second);
@@ -1265,7 +1314,14 @@ public:
         }
     }
 
-    bool isMoving(int npcid) const { return movers_.count(npcid) != 0; }
+    bool isMoving(int npcid) const { return movers_.count(npcid) != 0 || flyers_.count(npcid) != 0; }
+
+    void tell(void* owner, int npcid, MoveEnd why)
+    {
+        if (!owner || !pawn_) return;
+        if (IPawnScript* script = pawn_->getScript(static_cast<AMX*>(owner)))
+            script->Call("OnNavMoveEnd", DefaultReturnValue_False, npcid, static_cast<int>(why));
+    }
 
     // Nav_SetDriveStyle: from now on, and for the drive it is on. -1 goes back to the
     // default (normal, or pursuit in a chase).
@@ -1294,6 +1350,16 @@ public:
     // Nav_GetDriveInfo: how a driver is doing right now.
     bool driveInfo(int npcid, float& speed, float& want, dnav::RoadClass& cls, float& limit, bool& reversing) const
     {
+        auto fl = flyers_.find(npcid);
+        if (fl != flyers_.end()) {
+            const dnav::Flight& f = fl->second.flight;
+            speed = std::sqrt(f.vel.x * f.vel.x + f.vel.y * f.vel.y + f.vel.z * f.vel.z);
+            want = f.want;
+            cls = dnav::RoadClass::Street;
+            limit = fl->second.spec.top;
+            reversing = false;
+            return true;
+        }
         auto it = movers_.find(npcid);
         if (it == movers_.end() || !driving(it->second.kind)) return false;
         const Mover& m = it->second;
@@ -1932,6 +1998,14 @@ public:
         if (carZ <= 0.0f) carZ = rideHeight(npc->getVehicle()->getModel());
         IPlayer* target = core_->getPlayers().get(quarry);
         if (!target || target->getID() == npc->getID()) return false;
+        if (dnav::isHelicopter(npc->getVehicle()->getModel())) {
+            Vector3 tpos, tvel;
+            whereIs(*target, tpos, tvel);
+            Flyer& f = startFlying(amx, *npc, speed);
+            f.quarry = quarry;
+            f.angle = dnav::angleFrom(dv(tpos), f.flight.pos);
+            return true;
+        }
         // A car already driving somewhere gives chase at the speed it has: it does not
         // stop dead first (its first plan weighs turning round against carrying on).
         Mover m;
@@ -1960,6 +2034,121 @@ public:
         m.style = styleOf(npcid, true);
         movers_[npcid] = std::move(m);
         return true;
+    }
+
+    // ── Helicopters ──────────────────────────────────────────────────────────
+
+    static dnav::Vec3 dv(const Vector3& v) { return { v.x, v.y, v.z }; }
+
+    // What a flight knows of the world: the highest face at (x, y) (never under the
+    // sea's surface), and rays. With no world.col it only keeps over its goal's height.
+    dnav::FlyWorld flyWorld() const
+    {
+        dnav::FlyWorld w;
+        if (!world_.loaded()) return w;
+        w.top = [this](float x, float y) {
+            dnav::RayHit hit;
+            if (world_.ray({ x, y, 1500.0f }, { x, y, -200.0f }, hit)) return std::max(hit.at.z, HELI_SEA);
+            return HELI_SEA;
+        };
+        w.ray = [this](const dnav::Vec3& a, const dnav::Vec3& b, float& t) {
+            dnav::RayHit hit;
+            if (!world_.ray(a, b, hit)) return false;
+            t = hit.t;
+            return true;
+        };
+        return w;
+    }
+
+    // An NPC in a helicopter takes off (or flies on) under DiamondNav: whatever it was
+    // doing ends, and its flight starts from where the helicopter is, as it is moving.
+    Flyer& startFlying(AMX* amx, INPC& npc, float speed)
+    {
+        IVehicle& heli = *npc.getVehicle();
+        const int id = npc.getID();
+        Flyer f;
+        auto was = flyers_.find(id);
+        const bool flying = was != flyers_.end();
+        if (flying) f.flight = was->second.flight;
+        end(id, END_STOPPED, false);
+        if (npc.isMoving()) npc.stopMove();
+        f.owner = amx;
+        f.spec = dnav::HeliSpec::of(heli.getModel());
+        f.placed = heli.getPosition();
+        if (!flying || glm::distance(f.placed, Vector3(f.flight.pos.x, f.flight.pos.y, f.flight.pos.z)) > HELI_MOVED) {
+            f.flight = dnav::Flight {};
+            f.flight.pos = dv(f.placed);
+            f.flight.vel = dv(heli.getVelocity() * VELOCITY_UNIT);
+            f.flight.heading = heli.getRotation().ToEuler().z;
+        }
+        f.flight.planIn = 0.0f;
+        f.goal.speed = speed > 0.0f ? speed * SPEED_UNIT : 0.0f;
+        f.last = TimePoint {};
+        return flyers_[id] = f;
+    }
+
+    bool flyTo(AMX* amx, int npcid, const Vector3& to, float speed, int flags)
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        if (!npc || !npc->getVehicle() || npc->getVehicleSeat() != 0) return false;
+        if (!dnav::isHelicopter(npc->getVehicle()->getModel())) return false;
+        Flyer& f = startFlying(amx, *npc, speed);
+        f.goal.at = dv(to);
+        f.goal.land = (flags & FLY_LAND) != 0;
+        return true;
+    }
+
+    void flyStep(int npcid, Flyer& f, TimePoint now)
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        IVehicle* heli = npc ? npc->getVehicle() : nullptr;
+        if (!npc || !heli || npc->getVehicleSeat() != 0) {
+            end(npcid, END_INTERRUPTED, false);
+            return;
+        }
+        const float dt = f.last == TimePoint {} ? 0.0f
+            : std::min(HELI_DT_MAX, duration_cast<Microseconds>(now - f.last).count() / 1e6f);
+        f.last = now;
+        // Put somewhere else (SetVehiclePos): it flies on from there.
+        const Vector3 at = heli->getPosition();
+        if (glm::distance(at, f.placed) > HELI_MOVED) {
+            f.flight.pos = dv(at);
+            f.flight.vel = {};
+            f.flight.planIn = 0.0f;
+        }
+        if (f.quarry >= 0) {
+            IPlayer* target = core_->getPlayers().get(f.quarry);
+            if (!target || target->getVirtualWorld() != npc->getVirtualWorld()) {
+                end(npcid, END_LOST, true);
+                return;
+            }
+            Vector3 tpos, tvel;
+            whereIs(*target, tpos, tvel);
+            f.quarryDist = glm::distance(tpos, at);
+            const float speed = f.goal.speed;
+            const Vector3 v = tvel * VELOCITY_UNIT;
+            const float tspeed = glm::length(Vector2(v));
+            f.trailing = tspeed > (f.trailing ? HELI_TRAIL_TO : HELI_TRAIL_FROM);
+            if (f.trailing) {
+                f.goal = dnav::trail(dv(tpos), dv(v), HELI_TRAIL, HELI_CHASE_HEIGHT);
+                f.angle = dnav::angleFrom(dv(tpos), f.flight.pos);    // circles on from where it is
+            } else {
+                f.goal = dnav::orbit(dv(tpos), dv(v), HELI_CHASE_RADIUS, HELI_CHASE_HEIGHT, HELI_CHASE_RATE,
+                    f.angle, true, dt);
+            }
+            f.goal.speed = speed;
+        }
+        if (dt <= 0.0f) return;
+        const bool there = dnav::fly(f.flight, f.goal, f.spec, flyWorld(), dt);
+        const dnav::Flight& fl = f.flight;
+        f.placed = Vector3(fl.pos.x, fl.pos.y, fl.pos.z);
+        // Not an NPC move: its position, rotation and velocity are set as they are, and
+        // its driver sync carries them (the velocity lets everyone's game carry it on
+        // smoothly between syncs).
+        npc->setVelocity(Vector3(fl.vel.x, fl.vel.y, fl.vel.z) / VELOCITY_UNIT, false);
+        npc->setVehiclePosition(f.placed, false);
+        npc->setVehicleRotation(GTAQuat(Vector3(fl.pitch, fl.roll, fl.heading)), false);
+        if (there && f.quarry < 0) end(npcid, END_ARRIVED, true);
     }
 
     // Where a player is and how fast they go (in their car, if they are in one).
@@ -2238,6 +2427,13 @@ public:
     // Nav_GetChaseInfo: how far the target is and what the chaser is doing about it.
     bool chaseInfo(int npcid, float& distance, int& mode) const
     {
+        auto fl = flyers_.find(npcid);
+        if (fl != flyers_.end()) {
+            if (fl->second.quarry < 0) return false;
+            distance = fl->second.quarryDist;
+            mode = CHASE_OVERHEAD;
+            return true;
+        }
         auto it = movers_.find(npcid);
         if (it == movers_.end() || !it->second.chase) return false;
         const Mover& m = it->second;
@@ -2301,6 +2497,7 @@ public:
         if (component == npcs_) {
             npcs_ = nullptr;
             movers_.clear();
+            flyers_.clear();
             byRequest_.clear();
         }
     }
@@ -2308,6 +2505,7 @@ public:
     void reset() override
     {
         movers_.clear();
+        flyers_.clear();
         byRequest_.clear();
     }
 
@@ -2326,6 +2524,7 @@ private:
     std::vector<dnav::PathResult> fresh_;
     std::vector<int> thinking_;
     std::unordered_map<int, Mover> movers_;     // npc id -> its walk or drive
+    std::unordered_map<int, Flyer> flyers_;     // npc id -> its flight
     std::unordered_map<int, int> byRequest_;    // request id -> npc id
 };
 
@@ -2463,6 +2662,11 @@ SCRIPT_API(Nav_DriveTo, bool(int npcid, float x, float y, float z, float speed, 
 SCRIPT_API(Nav_Chase, bool(int npcid, int targetid, float speed, float carZ, int flags))
 {
     return DiamondNav::instance && DiamondNav::instance->chase(GetAMX(), npcid, targetid, speed, carZ, flags);
+}
+
+SCRIPT_API(Nav_FlyTo, bool(int npcid, float x, float y, float z, float speed, int flags))
+{
+    return DiamondNav::instance && DiamondNav::instance->flyTo(GetAMX(), npcid, Vector3(x, y, z), speed, flags);
 }
 
 SCRIPT_API(Nav_Stop, bool(int npcid))

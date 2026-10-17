@@ -39,6 +39,7 @@ Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 Nav_WalkTo(npcid, x, y, z);                // walk there along the navmesh
 Nav_DriveTo(npcid, x, y, z);               // drive the NPC's car there along the roads
 Nav_Chase(npcid, playerid);                // chase a player, on or off the road
+Nav_FlyTo(npcid, x, y, z);                 // fly the NPC's helicopter there
 
 public OnNavMoveEnd(npcid, reason)
 {
@@ -72,7 +73,7 @@ loaded:
 [nav] loaded world.nav (walking)
 [nav] loaded vehicles.dnv: <models> vehicle models
 [nav] loaded world.col: <faces> faces
-[nav] DiamondNav 1.3.9: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
+[nav] DiamondNav 1.3.10: <tiles> walking tiles, <tiles> car tiles, <nodes> road nodes, 3 search threads
 ```
 
 ## Baking your world
@@ -298,6 +299,21 @@ straight at it, on a route, running at an edge, in the air). It ends with
 `NAV_END_LOST` if the target leaves or changes world. What the NPCs do during the
 chase (shoot, give up) is your script's. `NAV_STYLE_PURSUIT` drives flat out:
 cornering on the limit of the car's grip and braking as hard as it can.
+
+**Helicopters.** `Nav_FlyTo(npcid, x, y, z, speed, flags)` flies an NPC pilot's
+helicopter to a point. There is no path: it goes straight there, high enough to keep
+20 m over everything under and ahead of it (the tops of buildings, trees and hills
+in `world.col`, and the sea), climbing first when a tower is in the way and stopping
+short of anything solid ahead. It slows in time to stop and hovers at `z`, or, with
+`NAV_FLY_LAND`, comes down a glide slope and sets down on the ground or roof there.
+It flies like a helicopter: nose down to speed up, nose up to slow, banked into
+turns, at each model's own speed (a Maverick about 180 km/h, a Hunter 215, a
+Leviathan 135). `Nav_Chase` with an NPC flying a helicopter circles over the target
+instead of driving after it (22 m out, 28 m up, slowly round it, looking down at
+it), keeping up with a car flat out (`NAV_CHASE_OVERHEAD`). The flight is DiamondNav's
+own: no NPC_Move, the helicopter's position, rotation and velocity are set every tick
+and go out in its driver sync. Without `world.col` it keeps only to the height it is
+given.
 
 **Lines.** `Nav_IsLineClear(x1, y1, z1, x2, y2, z2, kind)` says whether a ped
 (`NAV_MESH_PED`) or a car (`NAV_MESH_CAR`) can go straight between two points on the

@@ -121,6 +121,12 @@ native (or a few) that a script calls on an NPC it already made.
   time (a follower sent after someone every half second used to stutter). On a bench of
   a follower after a target changing pace round the Idlewood alleys: 8.9 m behind on
   average (was 10.4), at most 24 m (was 31).
+- 1.3.10: helicopters. `Nav_FlyTo` flies an NPC pilot's helicopter to a point (hovering
+  there, or landing with `NAV_FLY_LAND`), keeping 20 m over the tops of everything
+  under and ahead of it in world.col; `Nav_Chase` in a helicopter circles over the
+  target (`NAV_CHASE_OVERHEAD`), as a police helicopter does. Its own flight model
+  (src/flying.cpp, tested in tests/test_flying.cpp): each model's speed, climb and turn
+  rate, leaning into speed changes and banking into turns. Planes and boats are later.
 
 ## 1.4: traffic
 
