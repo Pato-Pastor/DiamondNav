@@ -115,4 +115,9 @@ if(DNAV_TESTS)
     add_executable(dnav_flying_tests tests/test_flying.cpp)
     target_link_libraries(dnav_flying_tests PRIVATE dnav_common)
     add_test(NAME flying COMMAND dnav_flying_tests)
+    if(MSVC)
+        # The static runtime, as dnav_common is built with.
+        set_property(TARGET dnav_tests dnav_driving_tests dnav_collision_tests dnav_flying_tests PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
 endif()
