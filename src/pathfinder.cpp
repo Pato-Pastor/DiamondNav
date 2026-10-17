@@ -43,6 +43,12 @@ constexpr float MOMENTUM_MAX = 60.0f;   // ...nor further
 constexpr float MOMENTUM_LEG = 8.0f;    // m: a way turns the car round when a leg starting this near...
 constexpr float MOMENTUM_STUB = 0.5f;   // (and longer than this)
 constexpr float MOMENTUM_BACK = -0.17f; // ...heads back more than 100 degrees from its heading
+constexpr float ROAD_WEIGH = 60.0f;     // m: a chase further than this across the car mesh is weighed against the roads
+constexpr float OFF_DECK = 1.5f;        // a metre off every road's deck counts this many (dirt, kerbs, verges)
+constexpr float DECK_WIDER = 2.0f;      // m: a road's deck, widened by this either side
+constexpr float DECK_STEP = 4.0f;       // m: how often a leg is sampled for it
+constexpr float STEEP = 0.12f;          // a grade steeper than this...
+constexpr float STEEP_COST = 5.0f;      // ...costs this much more per unit of grade past it
 constexpr float JOIN_NEAR = 6.0f;       // m: the way onto a route's first point gets this near it
 constexpr int JOIN_TRIES = 4;           // roads tried to start from when there is no way onto one
 constexpr float JOIN_BUMPER = 0.6f;     // m over the ground: the walls the way onto a road may not meet
@@ -692,53 +698,82 @@ bool Pathfinder::clearOfWalls(const std::vector<Point>& pts, const std::vector<u
 // so the way from where the car is, which may start by turning it round, is weighed
 // against the way from a little further on along its heading, which keeps its
 // momentum: a turn round costs what stopping, turning and getting back up to speed
-// costs at that speed (turnRoundCost).
+// costs at that speed (turnRoundCost). Further off, the mesh's shortest way (often
+// straight across a hillside or a verge) is weighed against the roads' way too: a
+// metre off the road or up a steep grade costs more than one on it.
 PathResult Pathfinder::find(dtNavMeshQuery& q, const PathRequest& r) const
 {
     PathResult here = findMesh(q, r);
-    if (r.kind != PathKind::OffRoad || !r.road.hasHeading || r.road.speed < MOMENTUM_FROM) return here;
+    if (r.kind != PathKind::OffRoad || !r.road.hasHeading) return here;
     const float h = r.road.heading * 0.01745329f, fx = -std::sin(h), fy = std::cos(h);
-    const float turn = turnRoundCost(r.road.speed);
+    const bool moving = r.road.speed >= MOMENTUM_FROM;
+    const float turn = moving ? turnRoundCost(r.road.speed) : 0.0f;
+    const bool roads = roads_.loaded();
+    float deck = 0.0f;
+    auto onDeck = [&](float x, float y, float z) { return roads_.deckAt(x, y, z, deck, DECK_WIDER); };
     auto cost = [&](const PathResult& p) {
         if (p.status != PathStatus::Ok && p.status != PathStatus::Partial) return std::numeric_limits<float>::infinity();
-        float len = 0.0f, turns = 0.0f;
+        float len = 0.0f, turns = 0.0f, total = 0.0f;
         for (size_t i = 1; i < p.points.size(); i++) {
-            const float dx = p.points[i].x - p.points[i - 1].x, dy = p.points[i].y - p.points[i - 1].y;
+            const Point& a = p.points[i - 1];
+            const Point& b = p.points[i];
+            const float dx = b.x - a.x, dy = b.y - a.y;
             const float l = std::hypot(dx, dy);
             // (A leg of its first few metres heading back the way the car came: a turn
             // round. Its first leg alone missed a way that doubles back round a post
             // and then runs sideways.)
-            if (len < MOMENTUM_LEG && l > MOMENTUM_STUB && (dx * fx + dy * fy) / l < MOMENTUM_BACK) turns = turn;
+            if (moving && len < MOMENTUM_LEG && l > MOMENTUM_STUB && (dx * fx + dy * fy) / l < MOMENTUM_BACK)
+                turns = turn;
             len += l;
+            if (l < 1e-3f) continue;
+            float w = 1.0f;
+            if (roads && (i >= p.classes.size() || p.classes[i] == RoadClass::OffRoad)) {
+                const int n = std::max(1, static_cast<int>(l / DECK_STEP));
+                int off = 0;
+                for (int k = 0; k < n; k++) {
+                    const float t = (k + 0.5f) / n;
+                    if (!onDeck(a.x + dx * t, a.y + dy * t, a.z + (b.z - a.z) * t)) off++;
+                }
+                w += (OFF_DECK - 1.0f) * off / n;
+            }
+            if (i - 1 >= p.ledges.size() || !p.ledges[i - 1])
+                w += STEEP_COST * std::max(0.0f, std::fabs(b.z - a.z) / l - STEEP);
+            total += l * w;
         }
-        // (Short of the end, the rest as the crow flies.)
-        if (!p.points.empty()) len += std::hypot(r.to.x - p.points.back().x, r.to.y - p.points.back().y);
-        return len + turns;
+        // (Short of the end, the rest as the crow flies, off the road.)
+        if (!p.points.empty()) total += std::hypot(r.to.x - p.points.back().x, r.to.y - p.points.back().y) * OFF_DECK;
+        return total + turns;
     };
-    const float costHere = cost(here);
-    if (costHere < turn * 0.5f) return here;    // nowhere near worth weighing
-    float best = costHere;
+    float best = cost(here);
     PathResult pick = std::move(here);
-    for (float secs : { MOMENTUM_AHEAD, MOMENTUM_AHEAD * 2.0f }) {
-        const float d = std::clamp(r.road.speed * secs, MOMENTUM_MIN, MOMENTUM_MAX);
-        Point ahead { r.from.x + fx * d, r.from.y + fy * d, r.from.z };
-        if (!lineClearOn(q, reachOf(MeshKind::Car), r.from, ahead)) continue;
-        PathRequest on = r;
-        on.from = ahead;
-        PathResult there = findMesh(q, on);
-        if (there.status != PathStatus::Ok && there.status != PathStatus::Partial) continue;
-        // From the car, on to there, then that way.
-        there.points.insert(there.points.begin(), r.from);
-        there.speeds.insert(there.speeds.begin(), 1.0f);
-        there.classes.insert(there.classes.begin(), RoadClass::OffRoad);
-        there.junctions.insert(there.junctions.begin(), 0);
-        there.ledges.insert(there.ledges.begin(), 0);
-        if (there.speeds.size() > 1) there.speeds[1] = 1.0f;
-        const float c = cost(there);
-        if (c < best) {
-            best = c;
-            pick = std::move(there);
+    if (moving && best >= turn * 0.5f) {    // (else nowhere near worth weighing)
+        for (float secs : { MOMENTUM_AHEAD, MOMENTUM_AHEAD * 2.0f }) {
+            const float d = std::clamp(r.road.speed * secs, MOMENTUM_MIN, MOMENTUM_MAX);
+            Point ahead { r.from.x + fx * d, r.from.y + fy * d, r.from.z };
+            if (!lineClearOn(q, reachOf(MeshKind::Car), r.from, ahead)) continue;
+            PathRequest on = r;
+            on.from = ahead;
+            PathResult there = findMesh(q, on);
+            if (there.status != PathStatus::Ok && there.status != PathStatus::Partial) continue;
+            // From the car, on to there, then that way.
+            there.points.insert(there.points.begin(), r.from);
+            there.speeds.insert(there.speeds.begin(), 1.0f);
+            there.classes.insert(there.classes.begin(), RoadClass::OffRoad);
+            there.junctions.insert(there.junctions.begin(), 0);
+            there.ledges.insert(there.ledges.begin(), 0);
+            if (there.speeds.size() > 1) there.speeds[1] = 1.0f;
+            const float c = cost(there);
+            if (c < best) {
+                best = c;
+                pick = std::move(there);
+            }
         }
+    }
+    if (roads && std::hypot(r.to.x - r.from.x, r.to.y - r.from.y) > ROAD_WEIGH) {
+        PathRequest drive = r;
+        drive.kind = PathKind::Drive;
+        PathResult road = findRoute(drive, &q);
+        if (road.status == PathStatus::Ok && road.points.size() >= 2 && cost(road) < best) return road;
     }
     return pick;
 }

@@ -160,6 +160,7 @@ constexpr float STEP_UP = 0.5f;             // m: the most a car's wheels climb 
 constexpr float GROUND_RISE = 1.2f;         // m: a run-up's ground climbs or falls no more than this per sample
 constexpr float CLIMB_RISE = 2.0f;          // m: a straight run climbs no more than this per sample (27 degrees);
                                             // going down, any slope or drop, as far as CHASE_DROP_DZ in all
+constexpr float SEA_FLOOR = -3.0f;          // m: ground deeper than this, with no car mesh on it, is under the sea
 constexpr float FALL_STEP = 1.5f;           // m: the ground this much lower just past its middle: the car is off
                                             // an edge, and falls
 constexpr float BANK_SLOPE = 1.2f;          // m down per m along: the steepest a chasing car follows the ground down
@@ -799,6 +800,16 @@ public:
 
     static dnav::Vec3 v3(const Vector3& v) { return dnav::Vec3 { v.x, v.y, v.z }; }
 
+    // Ground at (x, y, gz) under the sea: below SEA_FLOOR, where the car mesh (baked
+    // with the water) has nothing. The collision has the sea bed but no water over it:
+    // a car that drove off a quay at it drove round down there for good.
+    bool underSea(float x, float y, float gz) const
+    {
+        if (gz >= SEA_FLOOR) return false;
+        float out;
+        return !(finder.meshLoaded(dnav::MeshKind::Car) && finder.groundAt(x, y, gz, GROUND_REACH, out, dnav::MeshKind::Car));
+    }
+
     // With the world's collision: whether the ground just past a car's middle is a
     // fall below the ground under it (it is going over an edge), not a slope it drives.
     bool offEdge(const Mover& m, const Vector3& pos, float headingRad) const
@@ -887,6 +898,10 @@ public:
             corners(at, h, now);
             const float rise = std::max(WALL_CLIMB, step * WALL_SLOPE);
             if (world_.ground(now[1].x, now[1].y, level, rise, rise, gz)) level = gz;
+            // (Off a quay into the sea is a wall too.)
+            else if (level > SEA_FLOOR + 1.0f && world_.ground(now[1].x, now[1].y, level, 0.5f, FALL_REACH, gz)
+                && underSea(now[1].x, now[1].y, gz))
+                return std::max(0.0f, t - WALL_STEP);
             const float nowZ = level + BUMPER;
             if (touching) {
                 touching = false;
@@ -948,6 +963,7 @@ public:
             // At the end, the first ground under the run is the target's (not a deck
             // over it).
             if (end && std::fabs(gz - toGround.z) >= CHASE_DIRECT_DZ) return false;
+            if (underSea(p.x, p.y, gz) && fromGround.z > SEA_FLOOR + 1.0f) return false;
             if (gz - level > CLIMB_RISE * std::max(1.0f, glm::distance(last, p) / CHASE_GROUND_STEP)) return false;
             if (fromGround.z - gz > CHASE_DROP_DZ) return false;
             // Falling away: level at the top, then down.
@@ -1451,6 +1467,8 @@ public:
             // On a ledge's run-up, straight at its landing: the way on from there (often
             // back under where it went off) is for once it is down.
             if (m.onLedge) aim = m.points[best + 1];
+            const float fullLook = look;
+            const float fullError = wrap180(glm::degrees(std::atan2(-(aim.x - pos.x), aim.y - pos.y)) - m.heading);
             // Off the road, never aim across a corner the car would clip: shorten the
             // look until the car mesh says the straight line to it is clear.
             // (A ledge's run-up leaves the mesh at its lip: up to its start is what the mesh
@@ -1497,8 +1515,15 @@ public:
             // Turning toward the aim follows an arc through it: no faster than the car's
             // grip holds on that arc, but fast enough to get round.
             const float abs = std::fabs(error);
+            // (The arc to the aim before a corner shortened the look, when that is the
+            // wider one: steering for a near aim at a corner of the path swung the error
+            // up and braked the car to a crawl at every corner across the car mesh,
+            // which the speed plan already slows it for.)
             if (abs > 3.0f) {
-                const float arc = look / (2.0f * std::sin(glm::radians(std::min(abs, 90.0f))));
+                auto arcTo = [](float l, float e) {
+                    return std::fabs(e) > 0.5f ? l / (2.0f * std::sin(glm::radians(std::min(std::fabs(e), 90.0f)))) : 1e9f;
+                };
+                const float arc = std::max(arcTo(look, abs), arcTo(fullLook, fullError));
                 target = std::min(target, std::sqrt((offRoad ? m.car.gripOff : m.car.grip) * use.grip
                     * std::max(arc, m.car.radius)));
             }

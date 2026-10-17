@@ -107,6 +107,15 @@ native (or a few) that a script calls on an NPC it already made.
   floating over dips), steps and steep ramps no longer read as walls, and a car past an
   edge falls instead of driving on level. `navquery route ... --heading h --speed m/s`
   shows a moving car's route; `navquery road x y` the nearest road node.
+- 1.3.8: chasers that don't brake at every corner or end up in the sea. Steering at a
+  near point round a corner of a car-mesh path no longer brakes the car to a crawl (the
+  speed plan already slows it for the corner), a chase across the car mesh is weighed
+  against the roads (a metre off the road or up a steep grade costs more, so the shortcut
+  across a hillside loses to the road round it), and the sea is a wall: below sea level
+  where the car mesh has no ground, a car no longer drives off a quay, and a straight run
+  never ends in the water. On the bench against 1.3.7: Ocean Docks 169 to 115 m behind
+  with no car stuck or in the water, the freeway 173 to 138, downtown zig-zag 140 to 104,
+  the beach 50 to 41.
 
 ## 1.4: traffic
 
