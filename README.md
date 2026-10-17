@@ -1,5 +1,10 @@
 # DiamondNav
 
+
+<img width="4096" height="4096" alt="d2f3d761-d9cb-439d-92f1-ed72a506a713" src="https://github.com/user-attachments/assets/95a88f22-a7e4-43c9-81b8-4fd04f2d135c" />
+
+Watch the preview on youtube: https://www.youtube.com/watch?v=mnA-6iFgfE4
+
 Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 
 - **Walking:** NPCs find their way on foot round walls, up stairs and across
