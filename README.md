@@ -387,6 +387,72 @@ on a later tick. Read the points with `Nav_GetPathPoint` (and, for routes, each
 point's speed factor with `Nav_GetPathPointSpeed` and road class with
 `Nav_GetPathPointClass`) inside that callback.
 
+**Awaiting a search with PawnPlus (optional, recommended).** DiamondNav needs
+nothing but open.mp. Every search already runs on the component's own threads and
+never holds up the server. With [PawnPlus](https://github.com/IllidanS4/PawnPlus)
+you can also wait for a search in the middle of a function, without splitting your
+code into a request here and a callback there. The function pauses at
+`task_await`, the server keeps running, and the function carries on with the points
+once the search is done:
+
+```pawn
+#include <PawnPlus>
+#include <DiamondNav>
+
+static Map:s_NavSearches;   // request id -> the Task waiting on it
+
+// Starts a walking path search and waits for it without blocking the server: the
+// calling function pauses here and carries on when the path is found. Returns a
+// List of points (each a Float[3]: x, y, z), or INVALID_LIST when there is no way.
+// Delete the list with list_delete when done with it.
+stock List:Nav_FindPathAsync(Float:fromX, Float:fromY, Float:fromZ, Float:toX, Float:toY, Float:toZ)
+{
+    new id = Nav_RequestPath(fromX, fromY, fromZ, toX, toY, toZ);
+    if (!id) return INVALID_LIST;
+    if (!map_valid(s_NavSearches)) s_NavSearches = map_new();
+    new Task:t = task_new();
+    map_add(s_NavSearches, id, t);
+    return List:task_await(t);
+}
+
+public OnNavPathResult(requestid, status, points)
+{
+    new Task:t;
+    if (!map_valid(s_NavSearches) || !map_get_safe(s_NavSearches, requestid, t)) return 1;
+    map_remove(s_NavSearches, requestid);
+    new List:path = INVALID_LIST;
+    if (status == NAV_OK || status == NAV_PARTIAL) {
+        path = list_new();
+        new Float:p[3];
+        for (new i = 0; i < points; i++) {
+            Nav_GetPathPoint(requestid, i, p[0], p[1], p[2]);
+            list_add_arr(path, p);
+        }
+    }
+    task_set_result(t, path);
+    return 1;
+}
+
+// For example, how far a walk is:
+forward ShowWalk(playerid, Float:x, Float:y, Float:z);
+public ShowWalk(playerid, Float:x, Float:y, Float:z)
+{
+    new Float:px, Float:py, Float:pz;
+    GetPlayerPos(playerid, px, py, pz);
+    new List:path = Nav_FindPathAsync(px, py, pz - 1.0, x, y, z);
+    if (path == INVALID_LIST) return SendClientMessage(playerid, -1, "No way there on foot.");
+    new msg[64];
+    format(msg, sizeof msg, "The way there has %d points.", list_size(path));
+    SendClientMessage(playerid, -1, msg);
+    list_delete(path);
+    return 1;
+}
+```
+
+`task_await` pauses only the public it was called from (a command, a callback), and
+the rest of that public runs on a later tick. `Nav_RequestRoute` works the same way.
+Without PawnPlus, read the points in `OnNavPathResult` as above.
+
 Road flags: `NAV_ROAD_EMERGENCY` lets a route use emergency-only roads;
 `NAV_ROAD_BOATS` searches the water routes instead (for boats).
 
