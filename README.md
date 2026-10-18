@@ -1,6 +1,6 @@
 # DiamondNav
 
-
+<img width="520" height="293" alt="7f31776c-79de-468e-bb6c-925c993106c3" src="https://github.com/user-attachments/assets/db95e71b-1ebe-4eb5-91cf-3e0d8125c413" />
 <img width="4096" height="4096" alt="d2f3d761-d9cb-439d-92f1-ed72a506a713" src="https://github.com/user-attachments/assets/95a88f22-a7e4-43c9-81b8-4fd04f2d135c" />
 
 Watch the preview on youtube: https://www.youtube.com/watch?v=mnA-6iFgfE4
@@ -558,6 +558,18 @@ build it first ([npcs/README.md](npcs/README.md) explains how).
 `tests/server/run.py` boots a real open.mp server with the component on a small
 made-up map. It checks that an NPC walks round a wall and that another drives a
 route. CI runs every test on every push.
+
+## Limitations
+
+- **No physics:** there is no physics on the server. DiamondNav drives the car as a
+  driver would (speed, turning, braking), but it does not crash, skid or get pushed.
+  Drivers don't stop for traffic or players yet; that's up to your script.
+- **Ledges and drops are incomplete:** walkers and chasers take some ledges and
+  drops, but not all of them yet.
+- **Ramp chasing:** chasing a player up or down a ramp is not finished.
+- **No boats or planes:** NPCs walk, drive cars and fly helicopters. Boats and
+  planes are not driven yet.
+
 
 ## Good to know
 
