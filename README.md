@@ -1,9 +1,12 @@
 # DiamondNav
 
-<img width="520" height="293" alt="7f31776c-79de-468e-bb6c-925c993106c3" src="https://github.com/user-attachments/assets/db95e71b-1ebe-4eb5-91cf-3e0d8125c413" />
+
 <img width="4096" height="4096" alt="d2f3d761-d9cb-439d-92f1-ed72a506a713" src="https://github.com/user-attachments/assets/95a88f22-a7e4-43c9-81b8-4fd04f2d135c" />
 
-Watch the preview on youtube: https://www.youtube.com/watch?v=mnA-6iFgfE4
+[![NPC police cars chasing a player through Los Santos](docs/preview.gif)](https://www.youtube.com/watch?v=mnA-6iFgfE4)
+
+**[Watch the preview on YouTube](https://www.youtube.com/watch?v=mnA-6iFgfE4)**: driving, a police chase,
+and walking on foot up the escalators.
 
 Walking paths and driving routes for [open.mp](https://open.mp) NPCs.
 
@@ -559,6 +562,31 @@ build it first ([npcs/README.md](npcs/README.md) explains how).
 made-up map. It checks that an NPC walks round a wall and that another drives a
 route. CI runs every test on every push.
 
+## Performance
+
+Measured on a 4-core cloud VPS (Intel Xeon, 2.8 GHz) with all of San Andreas loaded, N NPCs working
+for a minute each. A server tick at
+open.mp's 200 ticks a second has 5 ms; DiamondNav's searches run on their own threads, and what it does
+on the main thread is steering the NPCs.
+
+| Example | Main-thread time | Slowest ticks |
+|---|---|---|
+| 50 NPCs, mostly on foot | 2% of a core | under 1 ms |
+| 100 cars driving | 7% of a core | about 4 ms |
+| 500 NPCs only walking | 1.3% of a core | under 0.2 ms |
+| 500 cars driving | 43% of a core | 20-38 ms (a stutter) |
+
+![DiamondNav's main-thread time by NPC count](docs/bench/cpu.svg)
+
+![Slowest ticks by NPC count](docs/bench/ticks.svg)
+
+Memory depends on what you load, not on how many NPCs there are: about 360 MB with everything,
+flat over time.
+
+![Server memory as each data file is loaded](docs/bench/memory.svg)
+
+![How long one path search takes](docs/bench/search.svg)
+
 ## Limitations
 
 - **No physics:** there is no physics on the server. DiamondNav drives the car as a
@@ -570,12 +598,8 @@ route. CI runs every test on every push.
 - **No boats or planes:** NPCs walk, drive cars and fly helicopters. Boats and
   planes are not driven yet.
 
-
 ## Good to know
 
-- There is no physics on the server: DiamondNav drives the car as a driver would
-  (speed, turning, braking), but it does not crash, skid or get pushed. Drivers
-  don't stop for traffic or players yet; that's up to your script.
 - How GTA's path files mark lane direction and median width is read from the files
   as documented by the community, and has not been checked against every road.
   If a car drives on the wrong side somewhere, please open an issue with the place.
