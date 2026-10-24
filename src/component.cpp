@@ -22,6 +22,7 @@
 #include <fstream>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "collision.hpp"
 #include "driving.hpp"
@@ -367,6 +368,7 @@ public:
     dnav::Pathfinder finder;
     dnav::Driving drivingModel;         // handling, speed limits, the speed plan
     std::unordered_map<int, dnav::DriveStyle> styles;   // Nav_SetDriveStyle, by NPC
+    std::unordered_set<int> noSwerve;   // Nav_SetSwerve off, by NPC
     bool canReverse_ = true;            // the NPC component backs cars up (our patched build)
     // The result being handed to a script right now (Nav_GetPathPoint reads it).
     const dnav::PathResult* current = nullptr;
@@ -652,7 +654,8 @@ public:
     // change of heading that touches nothing (the side it swerved to last first), no
     // faster than it is going; if every swerve touches something, it brakes to stop
     // short of it, or to follow a vehicle at its speed. A chaser that rams ignores its
-    // target's car.
+    // target's car. With Nav_SetSwerve off it never swerves: it brakes to a stop short
+    // of whatever is in the way, or follows a vehicle at its speed.
     void avoid(Mover& m, IVehicle& car, const Vector3& pos, bool offRoad, float tick, float& error, float& target)
     {
         // Looked at AVOID_EVERY at most (it costs rays and boxes); in between, the last
@@ -689,6 +692,7 @@ public:
         const Shape me = shapeOf(car.getModel());
         const int world = car.getVirtualWorld();
         const int ignore = m.chase && (m.chaseFlags & CHASE_RAM) ? m.quarryCar : -1;
+        const bool swerves = !noSwerve.count(m.npc);
         const float brake = offRoad ? m.car.brakeOff : m.car.brake;
         const float grip = (offRoad ? m.car.gripOff : m.car.grip) * 0.95f;
         const float speed = std::max(m.v, AVOID_CREEP);
@@ -756,6 +760,7 @@ public:
         }
         float latest = t, latestTurn = error, latestSide = 0.0f;
         for (float side : { first, -first }) {
+            if (!swerves) break;
             for (float swerve : AVOID_SWERVES) {
                 if (swerve == 0.0f && side != first) continue;     // straight on: tried once
                 const float turn = side * swerve;
@@ -780,7 +785,7 @@ public:
         // anything (along the road to a lamp post far ahead, out from a corner it
         // noses into): it takes that one, slow enough to stop short, and looks again
         // on the way, instead of standing there boxed in by what is ten metres off.
-        if (latestSide != 0.0f && speed * latest - WALL_GAP > AVOID_RUN) {
+        if (swerves && latestSide != 0.0f && speed * latest - WALL_GAP > AVOID_RUN) {
             m.avoidSide = latestSide;
             m.avoidFor = AVOID_STICK;
             m.blocked = 0.0f;
@@ -798,7 +803,7 @@ public:
         if (m.v < 0.5f && follow < 0.5f) m.blocked += dt;
         // A chaser held up near a target that stands still has got as near as it will.
         const bool waiting = m.chase && m.quarryDist < CHASE_CLOSE * 2.0f;
-        if (m.blocked > AVOID_STUCK && canReverse_ && !waiting) {
+        if (m.blocked > AVOID_STUCK && canReverse_ && !waiting && swerves) {
             m.blocked = 0.0f;
             m.avoidSide = first;
             m.avoidFor = AVOID_STICK + 5.0f;
@@ -1828,7 +1833,7 @@ public:
             // Not getting anywhere (wedged against a post, nose in a corner, going
             // back and forth): it backs out, straight or on either lock, and looks for
             // its way again; with no room behind either, it edges forward.
-            const bool wants = !m.idle && !(m.chase && m.quarryDist < CHASE_CLOSE * 2.0f);
+            const bool wants = !m.idle && !(m.chase && m.quarryDist < CHASE_CLOSE * 2.0f) && !noSwerve.count(npcid);
             if (wants && glm::distance(Vector2(pos), Vector2(m.stuckAt)) < STUCK_MOVE) {
                 m.stuckFor += dt;
             } else {
@@ -2536,6 +2541,7 @@ public:
     {
         end(npc.getID(), END_INTERRUPTED, false);
         styles.erase(npc.getID());
+        noSwerve.erase(npc.getID());
     }
 
     void onFree(IComponent* component) override
@@ -2761,6 +2767,19 @@ SCRIPT_API(Nav_GetDriveStyle, int(int npcid))
     if (!DiamondNav::instance) return -1;
     auto it = DiamondNav::instance->styles.find(npcid);
     return it == DiamondNav::instance->styles.end() ? -1 : static_cast<int>(it->second);
+}
+
+SCRIPT_API(Nav_SetSwerve, bool(int npcid, bool swerve))
+{
+    if (!DiamondNav::instance) return false;
+    if (swerve) DiamondNav::instance->noSwerve.erase(npcid);
+    else DiamondNav::instance->noSwerve.insert(npcid);
+    return true;
+}
+
+SCRIPT_API(Nav_GetSwerve, bool(int npcid))
+{
+    return DiamondNav::instance && !DiamondNav::instance->noSwerve.count(npcid);
 }
 
 SCRIPT_API(Nav_SetRoadSpeed, bool(int roadClass, float kmh))
