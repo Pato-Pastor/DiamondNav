@@ -281,6 +281,8 @@ struct Mover {
     float avoidFor = 0.0f;              // s it keeps to that side after the way is clear
     float blocked = 0.0f;               // s stopped with no way past a vehicle
     bool backOff = false;               // backing up to get round one
+    // OnNavDriverBlocked: the state last reported (0 none, 1 swerving, 2 stopping, 3 backing up).
+    int blockedState = 0;
     float backSteer = 0.0f;             // ...the nose swinging this way (degrees, left positive)
     float stuckFor = 0.0f;              // s it has wanted to move and has not got anywhere
     Vector3 stuckAt {};                 // ...from here
@@ -729,6 +731,7 @@ public:
         const float t = blockedAt(error, &hit);
         if (t < 0.0f) {
             m.blocked = 0.0f;
+            tellBlocked(m, 0);
             return;
         }
         // The side to pass on: the one it is already swerving to, else for a vehicle the
@@ -778,6 +781,7 @@ public:
                 m.blocked = 0.0f;
                 error = turn;
                 target = std::min(target, std::max(m.v, AVOID_CREEP));
+                if (turn != 0.0f) tellBlocked(m, 1);
                 return;
             }
         }
@@ -792,6 +796,7 @@ public:
             error = latestTurn;
             target = std::min(target, std::max(AVOID_CREEP * 0.5f,
                 std::min(std::max(m.v, AVOID_CREEP), std::sqrt(2.0f * brake * (speed * latest - WALL_GAP)))));
+            if (latestTurn != 0.0f) tellBlocked(m, 1);
             return;
         }
         // Boxed in: stop short of it, or follow a vehicle at its speed; stopped there a
@@ -801,6 +806,7 @@ public:
         const float room = speed * t - (hit ? AVOID_GAP : WALL_GAP);
         target = std::min(target, room > 0.0f ? std::sqrt(follow * follow + 2.0f * brake * room) : follow);
         if (m.v < 0.5f && follow < 0.5f) m.blocked += dt;
+        tellBlocked(m, 2);
         // A chaser held up near a target that stands still has got as near as it will.
         const bool waiting = m.chase && m.quarryDist < CHASE_CLOSE * 2.0f;
         if (m.blocked > AVOID_STUCK && canReverse_ && !waiting && swerves) {
@@ -813,6 +819,7 @@ public:
             // (No room behind either: it edges forward past it now, a scrape at worst,
             // rather than sit there till the stuck rescue does the same.)
             if (!m.backOff) m.nudge = NUDGE_SECS;
+            tellBlocked(m, 3);
         }
     }
 
@@ -1337,6 +1344,7 @@ public:
         }
         auto it = movers_.find(npcid);
         if (it == movers_.end()) return;
+        it->second.blockedState = 0;
         Mover m = std::move(it->second);
         movers_.erase(it);
         if (m.request) byRequest_.erase(m.request);
@@ -1357,6 +1365,16 @@ public:
         if (!owner || !pawn_) return;
         if (IPawnScript* script = pawn_->getScript(static_cast<AMX*>(owner)))
             script->Call("OnNavMoveEnd", DefaultReturnValue_False, npcid, static_cast<int>(why));
+    }
+
+    // Fires OnNavDriverBlocked on a state transition (0 = clear, 1 = swerving, 2 = stopping, 3 = backing up).
+    void tellBlocked(Mover& m, int state)
+    {
+        if (m.blockedState == state) return;
+        m.blockedState = state;
+        if (!m.owner || !pawn_) return;
+        if (IPawnScript* script = pawn_->getScript(static_cast<AMX*>(m.owner)))
+            script->Call("OnNavDriverBlocked", DefaultReturnValue_False, m.npc, state);
     }
 
     // Nav_SetDriveStyle: from now on, and for the drive it is on. -1 goes back to the
