@@ -232,6 +232,52 @@ bool RoadGraph::deckAt(float x, float y, float z, float& out, float wider) const
     return found;
 }
 
+bool RoadGraph::laneAt(float x, float y, float z, float heading, float reach, const RouteOptions& opt,
+    LanePoint& out) const
+{
+    constexpr float LEVEL = 4.0f;
+    constexpr float HEADING_WEIGHT = 10.0f;
+    const float h0 = heading * 0.01745329f;
+    const float fwdX = -std::sin(h0), fwdY = std::cos(h0);
+    float best = std::numeric_limits<float>::max();
+    bool found = false;
+    const int r = static_cast<int>(std::ceil(std::max(reach, EDGE_REACH) / CELL));
+    const int cx = cellOf(x), cy = cellOf(y);
+    for (int gx = -r; gx <= r; gx++)
+        for (int gy = -r; gy <= r; gy++) {
+            auto it = cells_.find(cellKey(cx + gx, cy + gy));
+            if (it == cells_.end()) continue;
+            for (uint32_t i : it->second) {
+                const RoadNode& a = nodes_[i];
+                if (!usable(a, opt)) continue;
+                for (uint32_t k = a.firstEdge; k < a.firstEdge + a.edgeCount; k++) {
+                    const RoadEdge& e = edges_[k];
+                    if (!e.lanes || !usable(nodes_[e.to], opt)) continue;
+                    const RoadNode& b = nodes_[e.to];
+                    const float len = len2d(b.x - a.x, b.y - a.y);
+                    if (len < 0.01f) continue;
+                    const float dx = (b.x - a.x) / len, dy = (b.y - a.y) / len;
+                    const float off = laneOffset(e);
+                    const float ax = a.x + dy * off, ay = a.y - dx * off;
+                    const float t = std::clamp((x - ax) * dx + (y - ay) * dy, 0.0f, len);
+                    const float px = ax + dx * t, py = ay + dy * t;
+                    const float pz = a.z + (b.z - a.z) * (t / len);
+                    if (std::fabs(pz - z) > LEVEL) continue;
+                    const float d = len2d(px - x, py - y);
+                    if (d > reach) continue;
+                    const float score = d + (1.0f - (dx * fwdX + dy * fwdY)) * HEADING_WEIGHT;
+                    if (score >= best) continue;
+                    best = score;
+                    found = true;
+                    float h = std::atan2(-dx, dy) * 57.29578f;
+                    if (h < 0.0f) h += 360.0f;
+                    out = { px, py, pz, h };
+                }
+            }
+        }
+    return found;
+}
+
 RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,
     std::vector<RoutePoint>& out, uint32_t* startNode) const
 {

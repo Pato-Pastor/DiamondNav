@@ -62,6 +62,11 @@ struct RoutePoint {
     bool junction = false;      // where three or more roads meet
 };
 
+struct LanePoint {
+    float x, y, z;
+    float heading;              // GTA's, degrees
+};
+
 struct RouteOptions {
     bool emergency = false;     // may use emergency-only roads
     bool boats = false;         // a boat: water routes only
@@ -124,6 +129,10 @@ public:
     // point. False off the edge of every road, as past a bridge's side.
     // `wider` widens every road by that much either side.
     bool deckAt(float x, float y, float z, float& out, float wider = 0.0f) const;
+
+    // The nearest lane of a road stretch within reach (on z's level) and the heading it
+    // runs; of two about as near, the one the given heading follows.
+    bool laneAt(float x, float y, float z, float heading, float reach, const RouteOptions& opt, LanePoint& out) const;
 
     // `startNode`, when given, gets the node the route starts from.
     RouteStatus route(float fx, float fy, float fz, float tx, float ty, float tz, const RouteOptions& opt,

@@ -1238,6 +1238,27 @@ public:
         return car ? shapeOf(car->getModel()).hl : 0.0f;
     }
 
+    bool teleportToLane(int npcid, float reach, int flags)
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        IVehicle* car = npc ? npc->getVehicle() : nullptr;
+        if (!car || npc->getVehicleSeat() != 0 || dnav::isHelicopter(car->getModel())) return false;
+        dnav::RouteOptions opt;
+        opt.emergency = (flags & 1) != 0;
+        opt.boats = (flags & 2) != 0;
+        const float ride = rideHeight(car->getModel());
+        const Vector3 pos = car->getPosition();
+        dnav::LanePoint lane;
+        if (!finder.roads().laneAt(pos.x, pos.y, pos.z - ride, car->getRotation().ToEuler().z, reach, opt, lane))
+            return false;
+        end(npcid, END_STOPPED, true);
+        if (npc->isMoving()) npc->stopMove();
+        npc->setVelocity(Vector3(0.0f), false);
+        npc->setVehiclePosition(Vector3(lane.x, lane.y, lane.z + ride), false);
+        npc->setVehicleRotation(GTAQuat(Vector3(0.0f, 0.0f, lane.heading)), false);
+        return true;
+    }
+
     // Starts a search for npc's walk or drive; true if it was queued.
     bool goTo(AMX* amx, int npcid, dnav::PathKind kind, const Vector3& to, NPCMoveType moveType, float speed,
         float carZ, const dnav::RouteOptions& road)
@@ -2780,6 +2801,11 @@ SCRIPT_API(Nav_SetSwerve, bool(int npcid, bool swerve))
 SCRIPT_API(Nav_GetSwerve, bool(int npcid))
 {
     return DiamondNav::instance && !DiamondNav::instance->noSwerve.count(npcid);
+}
+
+SCRIPT_API(Nav_TeleportToLane, bool(int npcid, float reach, int flags))
+{
+    return DiamondNav::instance && DiamondNav::instance->teleportToLane(npcid, reach, flags);
 }
 
 SCRIPT_API(Nav_SetRoadSpeed, bool(int roadClass, float kmh))
