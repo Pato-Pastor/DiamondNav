@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <deque>
 #include <fstream>
 #include <thread>
 #include <unordered_map>
@@ -27,6 +29,7 @@
 #include "collision.hpp"
 #include "driving.hpp"
 #include "flying.hpp"
+#include "impact.hpp"
 #include "pathfinder.hpp"
 
 #ifndef DNAV_VERSION_MAJOR
@@ -208,6 +211,36 @@ constexpr float HELI_DT_MAX = 0.1f;         // s: a longer gap between ticks fli
 constexpr float HELI_MOVED = 3.0f;          // m: something else moved the helicopter this far: it flies on from there
 constexpr float HELI_SEA = 0.0f;            // the sea's surface (no face in the collision)
 
+// Nav_SetPhysics: a vehicle no DiamondNav driver steers hits an NPC car, and the car is knocked
+// about (impact.hpp: a 2D impulse between the two boxes), then slides to a stop.
+constexpr float PHYS_MIN_CLOSING = 2.0f;    // m/s: a slower closing is no hit (avoidance deals with it)
+constexpr float PHYS_RESTITUTION = 0.15f;   // how bouncy a hit is: cars crumple, they do not bounce
+constexpr float PHYS_ROLL_MU = 0.4f;        // a knocked car rolls along its axis: this much resistance (mu)...
+constexpr float PHYS_GRIP_MU = 0.9f;        // ...but its tyres grip this hard across it (mu), so it never skates sideways
+constexpr float PHYS_TILT_K = 60.0f;        // its body pitches and rolls on a spring: stiffness (1/s^2)...
+constexpr float PHYS_TILT_C = 5.5f;         // ...and damping (1/s)
+constexpr float PHYS_PITCH_GAIN = 4.0f;     // degrees/s of pitch per m/s of speed a hit changes along the car (flip the sign if it dives the wrong way)
+constexpr float PHYS_ROLL_GAIN = 4.0f;      // ...and of roll per m/s across it (flip the sign if it leans into the hit)
+constexpr float PHYS_TILT_MAX = 8.0f;       // degrees
+constexpr float PHYS_SLOPE_MAX = 45.0f;     // degrees: the most a knocked car follows the ground's slope
+constexpr float PHYS_TILT_REST = 0.3f;      // degrees: settled
+constexpr float PHYS_HISTORY = 0.4f;        // s of a hitter's velocity kept: its own game bounces it before we see the overlap
+constexpr float PHYS_SAMPLE = 0.02f;        // s between kept samples
+constexpr float PHYS_SWEEP = 0.12f;         // s: a hitter's course is checked from this far back (no tunnelling at speed)
+constexpr auto PHYS_COOLDOWN = std::chrono::milliseconds(500);  // a car is not hit again sooner than this (more than PHYS_HISTORY)
+constexpr float PHYS_REST = 0.35f;          // m/s: a knocked car slower than this...
+constexpr float PHYS_REST_YAW = 0.15f;      // ...and spinning slower than this (rad/s) is at rest: drive() takes over
+constexpr float PHYS_MAX_SECS = 8.0f;       // s: it drives on after this long however it is moving
+constexpr float PHYS_DT_MAX = 0.1f;         // s: a longer gap between ticks slides as this
+constexpr float PHYS_MAX_SPEED = 35.0f;     // m/s: the fastest a hit throws a car
+constexpr float PHYS_MAX_YAW = 6.0f;        // rad/s: the fastest a hit spins it
+constexpr float PHYS_WALL_BOUNCE = 0.3f;    // a wall takes this share of its speed back
+constexpr float PHYS_DAMAGE = 30.0f;        // health lost per m/s of speed the hit changed
+constexpr float PHYS_MIN_HEALTH = 300.0f;   // a hit alone never takes it lower (the script decides the rest)
+constexpr float PHYS_SEPARATE = 1.5f;       // m/s: the fastest two cars left overlapping are pushed apart (a squeezed car never jumps)
+constexpr float PHYS_SLOP = 0.03f;          // m: an overlap this small is left alone
+constexpr float PHYS_HEIGHT = 1.4f;         // m: a vehicle's height when the model table has none (for its mass)
+
 bool driving(dnav::PathKind k)
 {
     return k != dnav::PathKind::Walk;
@@ -298,6 +331,16 @@ struct Mover {
     bool avoidHasTurn = false;          // ...and what it decided: a swerve,
     float avoidTurn = 0.0f;
     float avoidCap = 1e9f;              // ...and a speed to keep under (m/s)
+
+    // Nav_SetPhysics: hit by another vehicle, the car slides on its own (knockStep) until it
+    // stops, then drive() takes over again.
+    bool knocked = false;
+    dnav::Body knock;                   // its box's middle, velocity and spin (rad/s) while knocked
+    TimePoint knockStart {}, knockLast {}, hitUntil {};
+    Vector2 knockV {};                  // its velocity at the last step (what a hit changed shows against it)
+    float pitch = 0.0f, tilt = 0.0f;    // degrees: nose up, and roll
+    float pitchRate = 0.0f, tiltRate = 0.0f;
+    bool parked = false;                // a parked car that was hit: a Mover only to hold the knock, dropped at rest
 };
 
 // A vehicle's footprint: its collision box from above.
@@ -345,7 +388,30 @@ struct Traffic {
     Vector2 vel;                        // m/s
     float heading;                      // GTA's, degrees
     Shape shape;
+    int model = 0;
 };
+
+// A hitter's velocity at one moment (Nav_SetPhysics).
+struct Sample {
+    TimePoint at;
+    Vector2 pos;
+    Vector2 vel;                        // m/s
+};
+
+// An NPC car a hit can throw (Nav_SetPhysics): m is its Mover, null while it is parked and not yet hit.
+struct HitTarget {
+    int npc;
+    Mover* m;
+    const Traffic* t;
+};
+
+// The bits of a float a script callback takes.
+int cellOf(float f)
+{
+    int32_t c;
+    std::memcpy(&c, &f, sizeof(c));
+    return static_cast<int>(c);
+}
 
 // An NPC flying a helicopter (Nav_FlyTo, or Nav_Chase in one).
 struct Flyer {
@@ -372,6 +438,7 @@ public:
     std::unordered_map<int, dnav::DriveStyle> styles;   // Nav_SetDriveStyle, by NPC
     std::unordered_set<int> noSwerve;   // Nav_SetSwerve off, by NPC
     bool canReverse_ = true;            // the NPC component backs cars up (our patched build)
+    bool physics = false;               // Nav_SetPhysics: vehicles hitting NPC cars knock them about
     // The result being handed to a script right now (Nav_GetPathPoint reads it).
     const dnav::PathResult* current = nullptr;
 
@@ -482,6 +549,8 @@ public:
             if (m.owner == amx) m.owner = nullptr;
         for (auto& [id, f] : flyers_)
             if (f.owner == amx) f.owner = nullptr;
+        for (auto it = owners_.begin(); it != owners_.end();)
+            it = it->second == amx ? owners_.erase(it) : std::next(it);
     }
 
     void onTick(Microseconds, TimePoint now) override
@@ -501,10 +570,22 @@ public:
             auto it = movers_.find(id);
             if (it != movers_.end()) think(id, it->second, now);
         }
+        // Physics: what hits an NPC car knocks it about; the knocked slide on (until they stop).
+        if (physics) {
+            seeTraffic();
+            physicsStep(now);
+        }
+        thinking_.clear();
+        for (const auto& [id, m] : movers_)
+            if (m.knocked) thinking_.push_back(id);
+        for (int id : thinking_) {
+            auto it = movers_.find(id);
+            if (it != movers_.end() && it->second.knocked) knockStep(id, it->second, now);
+        }
         // Drivers steer (ids first: arriving ends a drive).
         thinking_.clear();
         for (const auto& [id, m] : movers_) {
-            if (!driving(m.kind) || m.request || (!m.chase && m.points.empty())) continue;
+            if (!driving(m.kind) || m.request || m.knocked || (!m.chase && m.points.empty())) continue;
             INPC* npc = npcs_ ? npcs_->get(id) : nullptr;
             if (!npc || npc->getPosition() != m.lastPos || now - m.lastDrive >= DRIVE_IDLE) thinking_.push_back(id);
         }
@@ -606,8 +687,12 @@ public:
             t.world = v->getVirtualWorld();
             t.pos = v->getPosition();
             t.heading = v->getRotation().ToEuler().z;
+            t.model = v->getModel();
             auto d = driven.find(t.id);
-            if (d != driven.end() && d->second->rolling) {
+            if (d != driven.end() && d->second->knocked) {
+                t.heading = d->second->heading;
+                t.vel = Vector2(d->second->knock.vx, d->second->knock.vy);
+            } else if (d != driven.end() && d->second->rolling) {
                 t.heading = d->second->heading;
                 t.vel = forwardOf(t.heading) * (d->second->reversing ? -d->second->v : d->second->v);
             } else {
@@ -1347,18 +1432,27 @@ public:
         it->second.blockedState = 0;
         Mover m = std::move(it->second);
         movers_.erase(it);
+        if (m.knocked && npcs_) {
+            // Stopped while sliding: it stops where it is.
+            if (INPC* npc = npcs_->get(npcid)) npc->setVelocity(Vector3(0.0f), false);
+        }
         if (m.request) byRequest_.erase(m.request);
         if (m.plan) byRequest_.erase(m.plan);
         if (stopNpc && !m.request && npcs_) {
             if (INPC* npc = npcs_->get(npcid)) npc->stopMove();
         }
-        if (m.owner && pawn_) {
+        if (m.owner && !m.parked) owners_[npcid] = m.owner;
+        if (m.owner && pawn_ && !m.parked) {
             if (IPawnScript* script = pawn_->getScript(static_cast<AMX*>(m.owner)))
                 script->Call("OnNavMoveEnd", DefaultReturnValue_False, npcid, static_cast<int>(why));
         }
     }
 
-    bool isMoving(int npcid) const { return movers_.count(npcid) != 0 || flyers_.count(npcid) != 0; }
+    bool isMoving(int npcid) const
+    {
+        auto it = movers_.find(npcid);
+        return (it != movers_.end() && !it->second.parked) || flyers_.count(npcid) != 0;
+    }
 
     void tell(void* owner, int npcid, MoveEnd why)
     {
@@ -2244,6 +2338,495 @@ public:
         if (there && f.quarry < 0) end(npcid, END_ARRIVED, true);
     }
 
+    // ── Physics (Nav_SetPhysics) ─────────────────────────────────────────────
+
+    bool isKnocked(int npcid) const
+    {
+        auto it = movers_.find(npcid);
+        return it != movers_.end() && it->second.knocked;
+    }
+
+    // A vehicle's height for its mass: the model table's, else a car's.
+    float heightOf(int model)
+    {
+        auto it = heights_.find(model);
+        if (it != heights_.end()) return it->second;
+        float h = PHYS_HEIGHT;
+        Vector3 size;
+        if (Impl::getVehicleModelInfo(model, VehicleModelInfo_Size, size) && size.z > 0.5f) h = std::clamp(size.z, 0.8f, 4.0f);
+        heights_[model] = h;
+        return h;
+    }
+
+    static dnav::Obb obbOf(const Box& b) { return dnav::Obb { b.c.x, b.c.y, b.f.x, b.f.y, b.hw, b.hl }; }
+
+    // Every vehicle nobody drives with DiamondNav that is moving (by what its velocity was
+    // a moment ago: its own game has bounced it by the time the overlap is seen) is tested
+    // against every NPC car of ours; a hit throws the car (knockStep slides it from here).
+    void physicsStep(TimePoint now)
+    {
+        if (!vehicles_ || !npcs_) return;
+        std::unordered_map<int, int> ours;          // vehicle -> the NPC driving it
+        std::unordered_set<int> flown;              // vehicles our pilots fly
+        for (const auto& [id, m] : movers_) {
+            if (!driving(m.kind)) continue;
+            INPC* npc = npcs_->get(id);
+            if (npc && npc->getVehicle()) ours[npc->getVehicle()->getID()] = id;
+        }
+        for (const auto& [id, f] : flyers_) {
+            INPC* npc = npcs_->get(id);
+            if (npc && npc->getVehicle()) flown.insert(npc->getVehicle()->getID());
+        }
+        struct Hitter { const Traffic* t; Vector2 vel; Vector2 prev; };
+        std::vector<HitTarget> targets;
+        std::vector<Hitter> hitters;
+        std::unordered_set<int> present;
+        std::unordered_set<int> hitting;            // vehicles that hit this tick
+        auto secs = [](TimePoint a, TimePoint b) { return std::chrono::duration<float>(a - b).count(); };
+        for (const Traffic& t : traffic_) {
+            auto o = ours.find(t.id);
+            if (o != ours.end()) {
+                auto mv = movers_.find(o->second);
+                if (mv != movers_.end() && !mv->second.request && mv->second.rolling && !mv->second.airborne
+                    && !dnav::isHelicopter(t.model))
+                    targets.push_back({ o->second, &mv->second, &t });
+                continue;
+            }
+            if (flown.count(t.id) || dnav::isHelicopter(t.model)) continue;
+            present.insert(t.id);
+            const float speed = glm::length(t.vel);
+            auto hi = history_.find(t.id);
+            if (hi == history_.end()) {
+                if (speed < PHYS_MIN_CLOSING * 0.5f) continue;      // parked: nothing to remember
+                hi = history_.emplace(t.id, std::deque<Sample>()).first;
+            }
+            std::deque<Sample>& h = hi->second;
+            if (h.empty() || secs(now, h.back().at) >= PHYS_SAMPLE) h.push_back(Sample { now, Vector2(t.pos), t.vel });
+            while (!h.empty() && secs(now, h.front().at) > PHYS_HISTORY) h.pop_front();
+            // Its fastest moment lately is the speed it hit with.
+            const Sample* fastest = nullptr;
+            float best = 0.0f;
+            for (const Sample& s : h) {
+                const float sp = glm::length(s.vel);
+                if (sp > best) {
+                    best = sp;
+                    fastest = &s;
+                }
+            }
+            if (!fastest || best < PHYS_MIN_CLOSING) {
+                history_.erase(hi);
+                continue;
+            }
+            Vector2 prev = Vector2(t.pos);
+            for (const Sample& s : h)
+                if (secs(now, s.at) <= PHYS_SWEEP) {
+                    prev = s.pos;
+                    break;
+                }
+            hitters.push_back({ &t, fastest->vel, prev });
+            hitting.insert(t.id);
+        }
+        for (auto it = history_.begin(); it != history_.end();)
+            it = present.count(it->first) ? std::next(it) : history_.erase(it);
+        bool thrown = false;
+        for (const auto& [id, m] : movers_)
+            if (m.knocked) {
+                thrown = true;
+                break;
+            }
+        if (hitters.empty() && !thrown) return;
+        // NPC cars no drive of ours holds (arrived, stopped, never sent anywhere) are hit too, while
+        // they stand still: one gets a Mover of its own when it is (adopt), to hold the knock.
+        for (const Traffic& t : traffic_) {
+            if (ours.count(t.id) || flown.count(t.id) || dnav::isHelicopter(t.model)) continue;
+            if (glm::length(t.vel) >= PHYS_MIN_CLOSING * 0.5f) continue;    // moving: not ours to throw
+            IVehicle* v = vehicles_->get(t.id);
+            IPlayer* driver = v ? v->getDriver() : nullptr;
+            INPC* npc = driver ? npcs_->get(driver->getID()) : nullptr;
+            if (npc && !movers_.count(npc->getID())) targets.push_back({ npc->getID(), nullptr, &t });
+        }
+        if (thrown) thrownHits(now, ours, flown, hitting, targets);
+        if (hitters.empty() || targets.empty()) return;
+
+        struct Report { int npc; int hitter; void* owner; float kmh; float x, y, z; };
+        std::vector<Report> reports;
+        for (const Hitter& h : hitters) {
+            const Traffic& ht = *h.t;
+            const Vector2 cur(ht.pos);
+            const float travel = glm::distance(h.prev, cur);
+            const float hm = dnav::massOf(ht.shape.hl * 2.0f, ht.shape.hw * 2.0f, heightOf(ht.model));
+            for (HitTarget& tg : targets) {
+                const Traffic& nt = *tg.t;
+                if (nt.id == ht.id || (tg.m && now < tg.m->hitUntil) || nt.world != ht.world || std::fabs(nt.pos.z - ht.pos.z) > AVOID_LEVEL) continue;
+                if (glm::distance(Vector2(nt.pos), cur) > nt.shape.hl + ht.shape.hl + travel + 1.0f) continue;
+                const Box nb = boxAt(nt.shape, Vector2(nt.pos), nt.heading);
+                // Its box from where it was a moment ago to where it is, so a fast hit is not missed.
+                dnav::Contact c;
+                Box hb = boxAt(ht.shape, cur, ht.heading);
+                bool touched = false;
+                for (int s = 0; s <= 3 && !touched; s++) {
+                    const Vector2 p = h.prev + (cur - h.prev) * (static_cast<float>(s) / 3.0f);
+                    hb = boxAt(ht.shape, p, ht.heading);
+                    touched = dnav::contact(obbOf(nb), obbOf(hb), c);
+                }
+                if (!touched) continue;
+                const bool knocked = tg.m && tg.m->knocked;
+                dnav::Body a = knocked ? tg.m->knock : dnav::Body {};
+                a.x = nb.c.x;
+                a.y = nb.c.y;
+                if (!knocked) {
+                    a.vx = nt.vel.x;
+                    a.vy = nt.vel.y;
+                    a.yaw = 0.0f;
+                }
+                a.mass = dnav::massOf(nt.shape.hl * 2.0f, nt.shape.hw * 2.0f, heightOf(nt.model));
+                a.inertia = dnav::inertiaOf(a.mass, nt.shape.hl * 2.0f, nt.shape.hw * 2.0f);
+                dnav::Body b;
+                b.x = hb.c.x;
+                b.y = hb.c.y;
+                b.vx = h.vel.x;
+                b.vy = h.vel.y;
+                b.mass = hm;
+                b.inertia = dnav::inertiaOf(hm, ht.shape.hl * 2.0f, ht.shape.hw * 2.0f);
+                const float j = dnav::collide(a, b, c, PHYS_RESTITUTION, PHYS_MIN_CLOSING);
+                if (j <= 0.0f) continue;
+                const float speed = std::sqrt(a.vx * a.vx + a.vy * a.vy);
+                if (speed > PHYS_MAX_SPEED) {
+                    a.vx *= PHYS_MAX_SPEED / speed;
+                    a.vy *= PHYS_MAX_SPEED / speed;
+                }
+                a.yaw = std::clamp(a.yaw, -PHYS_MAX_YAW, PHYS_MAX_YAW);
+                INPC* npc = npcs_->get(tg.npc);
+                IVehicle* car = npc ? npc->getVehicle() : nullptr;
+                if (!car) continue;
+                if (!tg.m) tg.m = &adopt(tg.npc, nt);
+                Mover& m = *tg.m;
+                if (!m.knocked) beginKnock(m, *npc, nt, now);
+                m.knock = a;
+                m.hitUntil = now + PHYS_COOLDOWN;
+                const float dv = j / a.mass;                // m/s of speed the hit changed
+                if (car->getHealth() > PHYS_MIN_HEALTH)
+                    car->setHealth(std::max(PHYS_MIN_HEALTH, car->getHealth() - dv * PHYS_DAMAGE));
+                reports.push_back({ tg.npc, ht.id, m.owner, dv * 3.6f, c.px, c.py, nt.pos.z });
+            }
+        }
+        // (Last: a script may end a move or remove an NPC in its callback.)
+        for (const Report& r : reports) tellHit(r.owner, r.npc, r.hitter, r.kmh, r.x, r.y, r.z);
+    }
+
+    void tellHit(void* owner, int npc, int hitter, float kmh, float x, float y, float z)
+    {
+        if (!owner || !pawn_) return;
+        if (IPawnScript* script = pawn_->getScript(static_cast<AMX*>(owner)))
+            script->Call("OnNavVehicleHit", DefaultReturnValue_False, npc, hitter, cellOf(kmh), cellOf(x), cellOf(y), cellOf(z));
+    }
+
+    // A car's first knock: its drive stops (drive() leaves a knocked car alone) and its hands come off the wheel.
+    void beginKnock(Mover& m, INPC& npc, const Traffic& nt, TimePoint now)
+    {
+        if (npc.isMoving()) npc.stopMove();
+        uint16_t ud, lr, keys;
+        npc.getKeys(ud, lr, keys);
+        npc.setKeys(ud, 0, keys);
+        m.knocked = true;
+        m.knockStart = now;
+        m.knockLast = now;
+        m.heading = nt.heading;
+        m.knockV = nt.vel;
+    }
+
+    // A knocked car is a hitter too, on its own slide. An NPC car of ours it runs into (parked,
+    // driving, or knocked itself) is thrown by it and the car takes the same impulse back; any
+    // other vehicle (a player's, an empty one) just stops it. Boxes left overlapping are pushed
+    // apart: both cars are ours to move, and nothing else would.
+    void thrownHits(TimePoint now, const std::unordered_map<int, int>& ours, const std::unordered_set<int>& flown,
+        const std::unordered_set<int>& hitting, std::vector<HitTarget>& targets)
+    {
+        std::unordered_map<int, HitTarget*> movable;
+        for (HitTarget& tg : targets) movable[tg.t->id] = &tg;
+        struct Report { int npc; int hitter; void* owner; float kmh; float x, y, z; };
+        std::vector<Report> reports;
+        auto cap = [](dnav::Body& b, float top) {
+            const float speed = std::sqrt(b.vx * b.vx + b.vy * b.vy);
+            if (speed > top) {
+                b.vx *= top / speed;
+                b.vy *= top / speed;
+            }
+            b.yaw = std::clamp(b.yaw, -PHYS_MAX_YAW, PHYS_MAX_YAW);
+        };
+        auto hurt = [](IVehicle& car, float dv) {
+            if (car.getHealth() > PHYS_MIN_HEALTH) car.setHealth(std::max(PHYS_MIN_HEALTH, car.getHealth() - dv * PHYS_DAMAGE));
+        };
+        for (const Traffic& kt : traffic_) {
+            auto o = ours.find(kt.id);
+            if (o == ours.end()) continue;
+            auto mv = movers_.find(o->second);
+            if (mv == movers_.end() || !mv->second.knocked) continue;
+            Mover& km = mv->second;
+            INPC* knpc = npcs_->get(o->second);
+            IVehicle* kcar = knpc ? knpc->getVehicle() : nullptr;
+            if (!kcar) continue;
+            const float dt = std::min(PHYS_DT_MAX, std::chrono::duration<float>(now - km.knockLast).count());
+            for (const Traffic& ot : traffic_) {
+                if (ot.id == kt.id || ot.world != kt.world || std::fabs(ot.pos.z - kt.pos.z) > AVOID_LEVEL) continue;
+                if (flown.count(ot.id) || dnav::isHelicopter(ot.model) || hitting.count(ot.id)) continue;
+                const Vector2 kv(km.knock.vx, km.knock.vy);
+                if (glm::distance(Vector2(ot.pos), Vector2(kt.pos)) > kt.shape.hl + ot.shape.hl + glm::length(kv) * dt + 1.0f)
+                    continue;
+                auto mo = movable.find(ot.id);
+                HitTarget* tg = mo != movable.end() ? mo->second : nullptr;
+                INPC* onpc = tg ? npcs_->get(tg->npc) : nullptr;
+                IVehicle* ocar = onpc ? onpc->getVehicle() : nullptr;
+                if (!ocar) tg = nullptr;
+                const bool oKnocked = tg && tg->m && tg->m->knocked;
+                // Two knocked cars meet once: the lower vehicle id's turn.
+                if (oKnocked && ot.id < kt.id && movable.count(kt.id)) continue;
+                const Box ob = boxAt(ot.shape, Vector2(ot.pos), ot.heading);
+                // Its box along this tick's slide too, so a fast one does not go through.
+                dnav::Contact c;
+                Box kbox = boxAt(kt.shape, Vector2(kt.pos), kt.heading);
+                int s = 0;
+                for (; s <= 3; s++) {
+                    kbox = boxAt(kt.shape, Vector2(kt.pos) + kv * (dt * static_cast<float>(s) / 3.0f), kt.heading);
+                    if (dnav::contact(obbOf(kbox), obbOf(ob), c)) break;
+                }
+                if (s > 3) continue;
+                dnav::Body kb = km.knock;
+                const Vector2 kAt(kb.x, kb.y);
+                kb.x = kbox.c.x;
+                kb.y = kbox.c.y;
+                dnav::Body other = oKnocked ? tg->m->knock : dnav::Body {};
+                other.x = ob.c.x;
+                other.y = ob.c.y;
+                if (!oKnocked) {
+                    other.vx = ot.vel.x;
+                    other.vy = ot.vel.y;
+                    other.yaw = 0.0f;
+                }
+                other.mass = dnav::massOf(ot.shape.hl * 2.0f, ot.shape.hw * 2.0f, heightOf(ot.model));
+                other.inertia = dnav::inertiaOf(other.mass, ot.shape.hl * 2.0f, ot.shape.hw * 2.0f);
+                // Both get the same impulse (each against what the other was before it).
+                const dnav::Body kPre = kb, oPre = other;
+                const float jk = dnav::collide(kb, oPre, c, PHYS_RESTITUTION, PHYS_MIN_CLOSING);
+                float jo = 0.0f;
+                if (tg && jk > 0.0f) {
+                    dnav::Contact back = c;
+                    back.nx = -c.nx;
+                    back.ny = -c.ny;
+                    jo = dnav::collide(other, kPre, back, PHYS_RESTITUTION, PHYS_MIN_CLOSING);
+                }
+                // Left overlapping, they back out of each other by their masses (all of it the
+                // knocked car's when the other is not ours to move), at PHYS_SEPARATE at most: a car
+                // squeezed between two others is deep in both and must not be thrown out of them.
+                // Only a box that overlaps where it stands: one that only would, further along its
+                // slide, is stopped by the impulse.
+                // A hit cannot make either car faster than what went into it, so hits chained
+                // through a line of cars never add up to more than the shove that started them.
+                const float top = std::min(PHYS_MAX_SPEED,
+                    (1.0f + PHYS_RESTITUTION) * (std::hypot(kPre.vx, kPre.vy) + std::hypot(oPre.vx, oPre.vy)));
+                const bool pushO = tg && (jo > 0.0f || oKnocked);
+                const float share = pushO ? other.mass / (kb.mass + other.mass) : 1.0f;
+                const float push = s == 0 ? std::clamp(c.depth - PHYS_SLOP, 0.0f, PHYS_SEPARATE * dt) : 0.0f;
+                cap(kb, top);
+                km.knock = kb;
+                km.knock.x = kAt.x - c.nx * push * share;
+                km.knock.y = kAt.y - c.ny * push * share;
+                if (jk > 0.0f) {
+                    hurt(*kcar, jk / kb.mass);
+                    reports.push_back({ o->second, ot.id, km.owner, jk / kb.mass * 3.6f, c.px, c.py, kt.pos.z });
+                }
+                if (!pushO) continue;
+                if (!tg->m) tg->m = &adopt(tg->npc, ot);
+                Mover& om = *tg->m;
+                if (!om.knocked) beginKnock(om, *onpc, ot, now);
+                cap(other, top);
+                om.knock = other;
+                om.knock.x = ob.c.x + c.nx * push * (1.0f - share);
+                om.knock.y = ob.c.y + c.ny * push * (1.0f - share);
+                if (jo > 0.0f) {
+                    om.hitUntil = now + PHYS_COOLDOWN;
+                    hurt(*ocar, jo / other.mass);
+                    reports.push_back({ tg->npc, kt.id, om.owner, jo / other.mass * 3.6f, c.px, c.py, ot.pos.z });
+                }
+            }
+        }
+        for (const Report& r : reports) tellHit(r.owner, r.npc, r.hitter, r.kmh, r.x, r.y, r.z);
+    }
+
+    // A parked NPC car that is hit: a Mover with no way to follow, only to hold the knock
+    // (endKnock drops it at rest). The script that last drove it hears of the hit.
+    Mover& adopt(int npcid, const Traffic& t)
+    {
+        Mover m;
+        m.npc = npcid;
+        m.kind = dnav::PathKind::Drive;
+        m.moveType = NPCMoveType_Drive;
+        m.carZ = rideHeight(t.model);
+        m.heading = t.heading;
+        m.rolling = true;
+        m.parked = true;
+        auto o = owners_.find(npcid);
+        if (o != owners_.end()) m.owner = o->second;
+        Mover& slot = movers_[npcid];
+        slot = std::move(m);
+        return slot;
+    }
+
+    // How the ground slopes under a car, along it and across it (degrees: nose up and banked
+    // left positive), from the ground under its four sides, and where its centre sits over
+    // that: its ride height straight up from the ground, so along the car's own up axis when
+    // it is tilted. False with no ground under any side (pitch and roll are then 0).
+    bool groundTilt(const Mover& m, IVehicle& car, const Vector3& pos, float heading, float& pitch, float& roll, float& centre)
+    {
+        pitch = 0.0f;
+        roll = 0.0f;
+        const Shape sh = shapeOf(car.getModel());
+        const Vector2 f = forwardOf(heading), r(f.y, -f.x), c(pos.x, pos.y);
+        const float base = pos.z - m.carZ;
+        float front, rear, right, left, sum = 0.0f;
+        int found = 0;
+        const Vector2 fp = c + f * sh.hl, rp = c - f * sh.hl, rgt = c + r * sh.hw, lft = c - r * sh.hw;
+        const bool hasFront = groundUnder(fp.x, fp.y, base, front), hasRear = groundUnder(rp.x, rp.y, base, rear);
+        const bool hasRight = groundUnder(rgt.x, rgt.y, base, right), hasLeft = groundUnder(lft.x, lft.y, base, left);
+        if (hasFront) { sum += front; found++; }
+        if (hasRear) { sum += rear; found++; }
+        if (hasRight) { sum += right; found++; }
+        if (hasLeft) { sum += left; found++; }
+        if (!found) return false;
+        if (hasFront && hasRear)
+            pitch = std::clamp(glm::degrees(std::atan2(front - rear, sh.hl * 2.0f)), -PHYS_SLOPE_MAX, PHYS_SLOPE_MAX);
+        if (hasRight && hasLeft)
+            roll = std::clamp(glm::degrees(std::atan2(right - left, sh.hw * 2.0f)), -PHYS_SLOPE_MAX, PHYS_SLOPE_MAX);
+        const float lean = std::max(0.5f, std::cos(glm::radians(pitch)) * std::cos(glm::radians(roll)));
+        centre = sum / static_cast<float>(found) + m.carZ / lean;
+        return true;
+    }
+
+    // A knocked car slides on under friction, bounces off walls and rests; then drive() takes
+    // over again from where it stopped.
+    void knockStep(int npcid, Mover& m, TimePoint now)
+    {
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        IVehicle* car = npc ? npc->getVehicle() : nullptr;
+        if (!npc || !car || npc->getVehicleSeat() != 0) {
+            end(npcid, END_INTERRUPTED, false);
+            return;
+        }
+        const float dt = std::min(PHYS_DT_MAX, std::chrono::duration<float>(now - m.knockLast).count());
+        m.knockLast = now;
+        if (dt <= 0.0f) return;
+        const Shape sh = shapeOf(car->getModel());
+        const Vector3 pos = car->getPosition();
+        dnav::Body& k = m.knock;
+        // What the hit changed since the last step shakes the body on its springs: nose down
+        // when the car is shoved back, leaning with a push from the side.
+        {
+            const Vector2 f0 = forwardOf(m.heading), r0(f0.y, -f0.x);
+            const Vector2 dv = Vector2(k.vx, k.vy) - m.knockV;
+            m.pitchRate += PHYS_PITCH_GAIN * glm::dot(dv, f0);
+            m.tiltRate += PHYS_ROLL_GAIN * glm::dot(dv, r0);
+        }
+        dnav::roll(k, m.heading, dt, PHYS_ROLL_MU, PHYS_GRIP_MU);
+        m.knockV = Vector2(k.vx, k.vy);
+        m.pitchRate += (-PHYS_TILT_K * m.pitch - PHYS_TILT_C * m.pitchRate) * dt;
+        m.tiltRate += (-PHYS_TILT_K * m.tilt - PHYS_TILT_C * m.tiltRate) * dt;
+        m.pitch = std::clamp(m.pitch + m.pitchRate * dt, -PHYS_TILT_MAX, PHYS_TILT_MAX);
+        m.tilt = std::clamp(m.tilt + m.tiltRate * dt, -PHYS_TILT_MAX, PHYS_TILT_MAX);
+        Vector2 move(k.vx * dt, k.vy * dt);
+        if (world_.loaded() && glm::dot(move, move) > 1e-8f) {
+            // Its box's corners and sides, at bumper height, against the world's walls.
+            const float z = pos.z - m.carZ + BUMPER;
+            const Box b = boxAt(sh, Vector2(k.x, k.y), m.heading);
+            const Vector2 pts[8] = {
+                b.c + b.f * b.hl + b.r * b.hw, b.c + b.f * b.hl - b.r * b.hw,
+                b.c - b.f * b.hl + b.r * b.hw, b.c - b.f * b.hl - b.r * b.hw,
+                b.c + b.f * b.hl, b.c - b.f * b.hl, b.c + b.r * b.hw, b.c - b.r * b.hw };
+            float first = 2.0f;
+            dnav::RayHit hit;
+            for (const Vector2& p : pts)
+                if (world_.wall({ p.x, p.y, z }, { p.x + move.x, p.y + move.y, z }, hit)) first = std::min(first, hit.t);
+            if (first <= 1.0f) {
+                move *= std::max(0.0f, first - 0.05f);
+                k.vx *= -PHYS_WALL_BOUNCE;
+                k.vy *= -PHYS_WALL_BOUNCE;
+                k.yaw *= 0.5f;
+            }
+        }
+        k.x += move.x;
+        k.y += move.y;
+        m.heading = wrap180(m.heading + glm::degrees(k.yaw * dt));
+        const Vector2 f = forwardOf(m.heading), r(f.y, -f.x);
+        const Vector2 origin = Vector2(k.x, k.y) - r * sh.ox - f * sh.oy;
+        const float speed = std::sqrt(k.vx * k.vx + k.vy * k.vy);
+        // Its height follows the ground (no falling off edges: it is flat physics), its centre
+        // its ride height over it, and its body leans with the slope.
+        float z = pos.z, gz, slopePitch, slopeRoll, centre;
+        const float lim = 0.4f + speed * dt * 0.8f;
+        if (groundTilt(m, *car, Vector3(origin.x, origin.y, pos.z), m.heading, slopePitch, slopeRoll, centre))
+            z = pos.z + std::clamp(centre - pos.z, -lim, lim);
+        else if (groundUnder(origin.x, origin.y, pos.z - m.carZ, gz))
+            z = pos.z + std::clamp(gz + m.carZ - pos.z, -lim, lim);
+        npc->setVelocity(Vector3(k.vx, k.vy, 0.0f) / VELOCITY_UNIT, false);
+        npc->setVehiclePosition(Vector3(origin.x, origin.y, z), false);
+        npc->setVehicleRotation(GTAQuat(Vector3(m.pitch + slopePitch, m.tilt + slopeRoll, m.heading)), false);
+        if ((speed < PHYS_REST && std::fabs(k.yaw) < PHYS_REST_YAW && std::fabs(m.pitch) < PHYS_TILT_REST
+                && std::fabs(m.tilt) < PHYS_TILT_REST)
+            || std::chrono::duration<float>(now - m.knockStart).count() > PHYS_MAX_SECS)
+            endKnock(m, *npc, now);
+    }
+
+    // At rest: the car drives on from here, along the nearest part of its path (a chase
+    // plans again).
+    void endKnock(Mover& m, INPC& npc, TimePoint now)
+    {
+        m.knocked = false;
+        m.pitch = m.tilt = m.pitchRate = m.tiltRate = 0.0f;
+        npc.setVelocity(Vector3(0.0f), false);
+        if (m.parked) {
+            // Nothing to drive on to: level, where it stopped, and the Mover goes (m with it).
+            float slopePitch = 0.0f, slopeRoll = 0.0f, centre;
+            if (IVehicle* car = npc.getVehicle()) groundTilt(m, *car, car->getPosition(), m.heading, slopePitch, slopeRoll, centre);
+            npc.setVehicleRotation(GTAQuat(Vector3(slopePitch, slopeRoll, m.heading)), false);
+            const int id = m.npc;
+            movers_.erase(id);
+            return;
+        }
+        const Vector3 pos = npc.getPosition();
+        m.v = 0.0f;
+        m.yawRate = 0.0f;
+        m.rolling = true;
+        m.reversing = false;
+        m.turning = false;
+        m.backed = 0.0f;
+        m.circling = 0.0f;
+        m.stuckFor = 0.0f;
+        m.stuckAt = pos;
+        m.nudge = 0.0f;
+        m.backOff = false;
+        m.avoidDt = 1.0f;
+        m.lastDrive = now;
+        m.lastPos = pos;
+        if (m.chase) {
+            m.points.clear();
+            m.nextThink = TimePoint {};
+        } else if (m.points.size() >= 2) {
+            // Back to the nearest stretch of the way (a big knock may have thrown it far).
+            float bestD = 1e30f;
+            for (size_t i = 0; i + 1 < m.points.size(); i++) {
+                const Vector2 a(m.points[i]), b(m.points[i + 1]), p(pos);
+                const Vector2 ab = b - a;
+                const float len2 = glm::dot(ab, ab);
+                const float t = len2 > 1e-6f ? std::clamp(glm::dot(p - a, ab) / len2, 0.0f, 1.0f) : 1.0f;
+                const float dz = std::fabs(m.points[i].z + (m.points[i + 1].z - m.points[i].z) * t - pos.z);
+                const float d = glm::distance(p, a + ab * t) + (dz > SEG_LEVEL ? dz * 2.0f : 0.0f);
+                if (d < bestD) {
+                    bestD = d;
+                    m.seg = i;
+                }
+            }
+        }
+    }
+
     // Where a player is and how fast they go (in their car, if they are in one).
     static void whereIs(IPlayer& p, Vector3& pos, Vector3& vel)
     {
@@ -2581,6 +3164,7 @@ public:
         end(npc.getID(), END_INTERRUPTED, false);
         styles.erase(npc.getID());
         noSwerve.erase(npc.getID());
+        owners_.erase(npc.getID());
     }
 
     void onFree(IComponent* component) override
@@ -2593,6 +3177,7 @@ public:
         if (component == vehicles_) {
             vehicles_ = nullptr;
             traffic_.clear();
+            history_.clear();
         }
         if (component == npcs_) {
             npcs_ = nullptr;
@@ -2604,6 +3189,7 @@ public:
 
     void reset() override
     {
+        history_.clear();
         movers_.clear();
         flyers_.clear();
         byRequest_.clear();
@@ -2625,7 +3211,10 @@ private:
     std::vector<int> thinking_;
     std::unordered_map<int, Mover> movers_;     // npc id -> its walk or drive
     std::unordered_map<int, Flyer> flyers_;     // npc id -> its flight
+    std::unordered_map<int, void*> owners_;     // npc id -> the script whose drive it last ended (hears of a hit on it parked)
     std::unordered_map<int, int> byRequest_;    // request id -> npc id
+    std::unordered_map<int, std::deque<Sample>> history_;   // Nav_SetPhysics: a hitter's last velocities, by vehicle
+    std::unordered_map<int, float> heights_;    // model -> its height (for its mass)
 };
 
 DiamondNav* DiamondNav::instance = nullptr;
@@ -2769,6 +3358,17 @@ SCRIPT_API(Nav_FlyTo, bool(int npcid, float x, float y, float z, float speed, in
     return DiamondNav::instance && DiamondNav::instance->flyTo(GetAMX(), npcid, Vector3(x, y, z), speed, flags);
 }
 
+SCRIPT_API(Nav_SetPhysics, bool(bool enabled))
+{
+    if (!DiamondNav::instance) return false;
+    DiamondNav::instance->physics = enabled;
+    return true;
+}
+
+SCRIPT_API(Nav_IsKnocked, bool(int npcid))
+{
+    return DiamondNav::instance && DiamondNav::instance->isKnocked(npcid);
+}
 SCRIPT_API(Nav_Stop, bool(int npcid))
 {
     if (!DiamondNav::instance || !DiamondNav::instance->isMoving(npcid)) return false;
