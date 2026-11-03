@@ -62,7 +62,7 @@ target_include_directories(dnav_detour PUBLIC ${recast_SOURCE_DIR}/Detour/Includ
 target_compile_definitions(dnav_detour PUBLIC DT_POLYREF64=1)
 
 # What the baker and the component share: the .nav file, the settings and the search.
-add_library(dnav_common STATIC src/navfile.cpp src/pathfinder.cpp src/roads.cpp src/driving.cpp src/collision.cpp src/flying.cpp)
+add_library(dnav_common STATIC src/navfile.cpp src/pathfinder.cpp src/roads.cpp src/driving.cpp src/collision.cpp src/flying.cpp src/impact.cpp)
 target_include_directories(dnav_common PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(dnav_common PUBLIC dnav_detour Threads::Threads)
@@ -115,9 +115,12 @@ if(DNAV_TESTS)
     add_executable(dnav_flying_tests tests/test_flying.cpp)
     target_link_libraries(dnav_flying_tests PRIVATE dnav_common)
     add_test(NAME flying COMMAND dnav_flying_tests)
+    add_executable(dnav_impact_tests tests/test_impact.cpp)
+    target_link_libraries(dnav_impact_tests PRIVATE dnav_common)
+    add_test(NAME impact COMMAND dnav_impact_tests)
     if(MSVC)
         # The static runtime, as dnav_common is built with.
-        set_property(TARGET dnav_tests dnav_driving_tests dnav_collision_tests dnav_flying_tests PROPERTY
+        set_property(TARGET dnav_tests dnav_driving_tests dnav_collision_tests dnav_flying_tests dnav_impact_tests PROPERTY
             MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 endif()

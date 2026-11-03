@@ -70,6 +70,7 @@ struct LanePoint {
 struct RouteOptions {
     bool emergency = false;     // may use emergency-only roads
     bool boats = false;         // a boat: water routes only
+    bool randomLane = true;     // each route drives in a random lane of a multi-lane road
     // A pursuit: any road either way (against a one-way street's traffic costs a
     // little more), and, with a heading, a start ahead of the car before one behind
     // it (turning round costs about a U-turn's distance).
@@ -149,7 +150,7 @@ private:
     static bool drivable(const RoadEdge& e, const RouteOptions& opt) { return e.lanes || (opt.anyWay && e.lanesBack); }
     bool hasEntry(uint32_t node, const RouteOptions& opt) const;
     const RoadEdge* edge(uint32_t from, uint32_t to) const;
-    float laneOffset(const RoadEdge& e) const;
+    float laneOffset(const RoadEdge& e, int lane = 0) const;
 
     std::vector<RoadNode> nodes_;
     std::vector<RoadEdge> edges_;

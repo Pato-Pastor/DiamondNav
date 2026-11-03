@@ -180,6 +180,19 @@ native bool:Nav_Stop(npcid);
 // Whether a Nav_WalkTo, Nav_DriveTo, Nav_FlyTo or Nav_Chase is under way (or searching).
 native bool:Nav_IsMoving(npcid);
 
+// ── Crashes ──────────────────────────────────────────────────────────────────
+
+// Physics on or off (off by default). On, a vehicle no DiamondNav driver steers (a
+// player's car, say) that hits an NPC car at 2 m/s or more knocks it about: the hit is a
+// 2D collision between the two vehicle boxes, so where and how fast it hits matter (a tap
+// on the rear shoves the car on, one on a corner spins it, a heavy truck is hardly moved
+// by a light car). The car slides to a stop, bouncing off walls, then drives on with its
+// route or chase. It loses health to the hit; OnNavVehicleHit tells the script.
+native bool:Nav_SetPhysics(bool:enabled);
+
+// Whether the NPC's car is sliding after a hit (it drives again once it stops).
+native bool:Nav_IsKnocked(npcid);
+
 // ── How cars drive ───────────────────────────────────────────────────────────
 
 // An NPC's driving style (NAV_STYLE_*), kept until the NPC is destroyed; it applies
@@ -269,3 +282,9 @@ forward OnNavPathResult(requestid, status, points);
 
 // A Nav_WalkTo, Nav_DriveTo, Nav_FlyTo or Nav_Chase ended (reason: NAV_END_*).
 forward OnNavMoveEnd(npcid, reason);
+
+// With Nav_SetPhysics on: a vehicle (vehicleid: a player's, or any other nobody drives
+// with DiamondNav) hit npcid's car. kmh is the speed the hit changed, x y z where it hit.
+// The car is already thrown and has lost health to the hit (never below 300); this is
+// where a script adds driver damage, a driver bailing out and so on.
+forward OnNavVehicleHit(npcid, vehicleid, Float:kmh, Float:x, Float:y, Float:z);

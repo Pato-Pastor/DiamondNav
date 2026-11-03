@@ -6,6 +6,7 @@
 #include <fstream>
 #include <limits>
 #include <queue>
+#include <random>
 
 namespace dnav {
 
@@ -126,12 +127,13 @@ const RoadEdge* RoadGraph::edge(uint32_t from, uint32_t to) const
     return nullptr;
 }
 
-float RoadGraph::laneOffset(const RoadEdge& e) const
+float RoadGraph::laneOffset(const RoadEdge& e, int lane) const
 {
-    // The inner lane: next to the median on a two-way road, the leftmost lane of a
-    // one-way road (whose lanes sit either side of the centre line).
-    if (e.lanesBack) return e.median * 0.5f + LANE_WIDTH * 0.5f;
-    return LANE_WIDTH * (0.5f - e.lanes * 0.5f);
+    // Lane 0 is the inner lane: next to the median on a two-way road, the leftmost lane
+    // of a one-way road (whose lanes sit either side of the centre line). Each lane
+    // after it is one lane width further right.
+    if (e.lanesBack) return e.median * 0.5f + LANE_WIDTH * 0.5f + LANE_WIDTH * lane;
+    return LANE_WIDTH * (0.5f - e.lanes * 0.5f) + LANE_WIDTH * lane;
 }
 
 int RoadGraph::nearest(float x, float y, float z, float reach, const RouteOptions& opt) const
@@ -241,6 +243,9 @@ bool RoadGraph::laneAt(float x, float y, float z, float heading, float reach, co
     const float fwdX = -std::sin(h0), fwdY = std::cos(h0);
     float best = std::numeric_limits<float>::max();
     bool found = false;
+    float bestGap = 0.0f, bestLen = 0.0f, bestDir[2] = { 0.0f, 0.0f };
+    const RoadEdge* bestEdge = nullptr;
+    const RoadNode* bestFrom = nullptr;
     const int r = static_cast<int>(std::ceil(std::max(reach, EDGE_REACH) / CELL));
     const int cx = cellOf(x), cy = cellOf(y);
     for (int gx = -r; gx <= r; gx++)
@@ -257,24 +262,43 @@ bool RoadGraph::laneAt(float x, float y, float z, float heading, float reach, co
                     const float len = len2d(b.x - a.x, b.y - a.y);
                     if (len < 0.01f) continue;
                     const float dx = (b.x - a.x) / len, dy = (b.y - a.y) / len;
-                    const float off = laneOffset(e);
-                    const float ax = a.x + dy * off, ay = a.y - dx * off;
-                    const float t = std::clamp((x - ax) * dx + (y - ay) * dy, 0.0f, len);
-                    const float px = ax + dx * t, py = ay + dy * t;
-                    const float pz = a.z + (b.z - a.z) * (t / len);
-                    if (std::fabs(pz - z) > LEVEL) continue;
-                    const float d = len2d(px - x, py - y);
-                    if (d > reach) continue;
-                    const float score = d + (1.0f - (dx * fwdX + dy * fwdY)) * HEADING_WEIGHT;
-                    if (score >= best) continue;
-                    best = score;
-                    found = true;
-                    float h = std::atan2(-dx, dy) * 57.29578f;
-                    if (h < 0.0f) h += 360.0f;
-                    out = { px, py, pz, h };
+                    for (int lane = 0; lane < e.lanes; lane++) {
+                        const float off = laneOffset(e, lane);
+                        const float ax = a.x + dy * off, ay = a.y - dx * off;
+                        const float t = std::clamp((x - ax) * dx + (y - ay) * dy, 0.0f, len);
+                        const float px = ax + dx * t, py = ay + dy * t;
+                        const float pz = a.z + (b.z - a.z) * (t / len);
+                        if (std::fabs(pz - z) > LEVEL) continue;
+                        const float d = len2d(px - x, py - y);
+                        if (d > reach) continue;
+                        const float score = d + (1.0f - (dx * fwdX + dy * fwdY)) * HEADING_WEIGHT;
+                        if (score >= best) continue;
+                        best = score;
+                        found = true;
+                        bestGap = d;
+                        bestEdge = &e;
+                        bestFrom = &a;
+                        bestDir[0] = dx;
+                        bestDir[1] = dy;
+                        bestLen = len;
+                        float h = std::atan2(-dx, dy) * 57.29578f;
+                        if (h < 0.0f) h += 360.0f;
+                        out = { px, py, pz, h };
+                    }
                 }
             }
         }
+    // A point on no lane (a road's centre line, where cars are spawned) gets a random
+    // lane of that road; one already on a lane keeps it.
+    if (found && opt.randomLane && bestEdge->lanes > 1 && bestGap > 1.5f) {
+        thread_local std::mt19937 rng { std::random_device {}() };
+        const int lane = std::uniform_int_distribution<int>(0, bestEdge->lanes - 1)(rng);
+        const float off = laneOffset(*bestEdge, lane);
+        const float ax = bestFrom->x + bestDir[1] * off, ay = bestFrom->y - bestDir[0] * off;
+        const float t = std::clamp((x - ax) * bestDir[0] + (y - ay) * bestDir[1], 0.0f, bestLen);
+        const float nz = bestFrom->z + (nodes_[bestEdge->to].z - bestFrom->z) * (t / bestLen);
+        out = { ax + bestDir[0] * t, ay + bestDir[1] * t, nz, out.heading };
+    }
     return found;
 }
 
@@ -463,6 +487,30 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         bool junction;          // its end node is a junction
     };
     std::vector<Leg> legs;
+    thread_local std::mt19937 rng { std::random_device {}() };
+    // A car keeps the lane it is in: the lane line nearest the start decides it for the
+    // whole route, so it never cuts across to another lane when it pulls away. Only a
+    // start that is on no lane rolls one at random.
+    int startLane = -1;
+    if (opt.randomLane && chain.size() >= 2) {
+        const RoadNode& a0 = nodes_[chain[0]];
+        const RoadNode& b0 = nodes_[chain[1]];
+        const RoadEdge* e0 = edge(chain[0], chain[1]);
+        const float len0 = len2d(b0.x - a0.x, b0.y - a0.y);
+        if (e0 && e0->lanes && len0 > 0.01f) {
+            const float dx0 = (b0.x - a0.x) / len0, dy0 = (b0.y - a0.y) / len0;
+            const float side = (fx - a0.x) * dy0 - (fy - a0.y) * dx0;     // right of the centre line
+            float bestGap = LANE_WIDTH;
+            for (int lane = 0; lane < e0->lanes; lane++) {
+                const float gap = std::fabs(side - laneOffset(*e0, lane));
+                if (gap < bestGap) {
+                    bestGap = gap;
+                    startLane = lane;
+                }
+            }
+        }
+    }
+    const float laneRoll = opt.randomLane ? std::uniform_real_distribution<float>(0.0f, 1.0f)(rng) : 0.0f;
     for (size_t i = 0; i + 1 < chain.size(); i++) {
         const RoadNode& a = nodes_[chain[i]];
         const RoadNode& b = nodes_[chain[i + 1]];
@@ -472,7 +520,10 @@ RouteStatus RoadGraph::route(float fx, float fy, float fz, float tx, float ty, f
         if (len < 0.01f) continue;
         dx /= len;
         dy /= len;
-        const float off = e ? laneOffset(*e) : 0.0f;
+        const int lane = !e ? 0
+            : startLane >= 0 ? std::min(startLane, std::max(0, e->lanes - 1))
+                             : std::max(0, std::min(static_cast<int>(laneRoll * e->lanes), e->lanes - 1));
+        const float off = e ? laneOffset(*e, lane) : 0.0f;
         const float rx = dy * off, ry = -dx * off;      // the right-hand side
         legs.push_back({ a.x + rx, a.y + ry, a.z, b.x + rx, b.y + ry, b.z, dx, dy, len,
             e ? classOf(chain[i], *e) : RoadClass::Street, b.edgeCount >= 3 });

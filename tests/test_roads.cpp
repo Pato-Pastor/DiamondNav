@@ -109,7 +109,9 @@ int main()
     if (!pts.empty()) CHECK(pts.front().x < 200.0f);
 
     // One-way: 5 -> 6 is fine, 6 -> 5 has no road.
-    CHECK(g.route(0, 300, 10, 200, 300, 10, car, pts) == RouteStatus::Ok);
+    RouteOptions fixed;
+    fixed.randomLane = false;
+    CHECK(g.route(0, 300, 10, 200, 300, 10, fixed, pts) == RouteStatus::Ok);
     if (!pts.empty()) {
         // Two lanes either side of the centre line: the inner one is just left of it.
         CHECK(std::fabs(pts.front().y - 300.0f - RoadGraph::LANE_WIDTH * 0.5f) < 0.01f);
