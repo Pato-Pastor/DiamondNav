@@ -223,7 +223,6 @@ constexpr float PHYS_TILT_C = 5.5f;         // ...and damping (1/s)
 constexpr float PHYS_PITCH_GAIN = 4.0f;     // degrees/s of pitch per m/s of speed a hit changes along the car (flip the sign if it dives the wrong way)
 constexpr float PHYS_ROLL_GAIN = 4.0f;      // ...and of roll per m/s across it (flip the sign if it leans into the hit)
 constexpr float PHYS_TILT_MAX = 8.0f;       // degrees
-constexpr float PHYS_SLOPE_MAX = 45.0f;     // degrees: the most a knocked car follows the ground's slope
 constexpr float PHYS_TILT_REST = 0.3f;      // degrees: settled
 constexpr float PHYS_HISTORY = 0.4f;        // s of a hitter's velocity kept: its own game bounces it before we see the overlap
 constexpr float PHYS_SAMPLE = 0.02f;        // s between kept samples
@@ -345,6 +344,8 @@ struct Mover {
     TimePoint knockStart {}, knockLast {}, hitUntil {};
     Vector2 knockV {};                  // its velocity at the last step (what a hit changed shows against it)
     float pitch = 0.0f, tilt = 0.0f;    // degrees: nose up, and roll
+    float slopeP = 0.0f;                // degrees: the ground's slope under it, eased (a knocked car)
+    float ride = 0.0f;                  // m: how high this car really sat over the ground when it was hit (0: carZ)
     float pitchRate = 0.0f, tiltRate = 0.0f;
     bool parked = false;                // a parked car that was hit: a Mover only to hold the knock, dropped at rest
 };
@@ -715,6 +716,74 @@ public:
         if (finder.meshLoaded(dnav::MeshKind::Ped) && finder.groundAt(x, y, z, GROUND_REACH, out, dnav::MeshKind::Ped))
             return true;
         return finder.roads().surfaceAt(x, y, z, ROAD_GROUND_REACH, out);
+    }
+
+    // The car's centre height over the point `d` along its heading (behind it, reversing): how a
+    // driver reads the ground (drive() and a knocked car both use this one). `z` is the height
+    // it starts from (the path's, for a driver on one); `anyGround` lets a car that is off
+    // its path (a knocked one) read the nearest ground of any kind, as one with no path does.
+    float heightFrom(const Mover& m, const Vector3& pos, const Vector2& fwd, float z, float d, bool reversing,
+        bool anyGround) const
+    {
+        const Vector2 at = Vector2(pos) + fwd * (reversing ? -d : d);
+        float gz;
+        if (reversing) {
+            if (world_.loaded() && world_.ground(at.x, at.y, pos.z - m.carZ, COL_UP, COL_DOWN, gz)) return gz + m.carZ;
+            if (finder.groundAt(at.x, at.y, pos.z - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car)) return gz + m.carZ;
+            if (anyGround && groundUnder(at.x, at.y, pos.z - m.carZ, gz)) return gz + m.carZ;
+            return pos.z;
+        }
+        if (m.drop && m.direct) return deckUnder(at.x, at.y, pos.z - m.carZ, gz) ? gz + m.carZ : pos.z;
+        if (m.chase && world_.loaded()) {
+            // Chasing, the ground ahead from no lower than the car's own level, and no
+            // steeper down than a bank: an edge on the way (a drop off a ledge the car
+            // mesh has, a kerb's lip) is driven at level, and offEdge tips it over once
+            // its middle is past, instead of it sinking into the deck short of it.
+            const float level = pos.z - m.carZ, from = std::max(z - m.carZ, level);
+            return world_.ground(at.x, at.y, from, COL_UP, from - level + d * BANK_SLOPE + 0.5f, gz) ? gz + m.carZ : pos.z;
+        }
+        if (world_.loaded() && world_.ground(at.x, at.y, z - m.carZ, COL_UP, COL_DOWN, gz))
+            return gz + m.carZ;     // the ground itself, wherever the car is going
+        if (m.ground && finder.groundAt(at.x, at.y, z - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
+            return gz + m.carZ;
+        if ((m.direct || m.points.size() < 2 || anyGround) && groundUnder(at.x, at.y, z - m.carZ, gz)) return gz + m.carZ;
+        return z;
+    }
+
+    // What a driver's NPC_Move makes of the ground for a car at `pos` on `heading` going at
+    // `speed` (m/s): it aims at a point `reach` ahead whose height follows the ground `nearBy`
+    // ahead, so the car pitches along that line (degrees, nose up positive; no roll: the NPC
+    // patch zeroes it) and climbs `slope` metres per metre travelled, up to `targetZ`.
+    void slopeLikeDriving(const Mover& m, const Vector3& pos, float heading, bool reversing, float speed,
+        float& pitch, float& slope, float& targetZ) const
+    {
+        const float reach = std::max(AHEAD_MIN, speed * AHEAD_TIME);
+        const float nearBy = std::min(reach, std::max(NEAR_MIN, speed * NEAR_TIME));
+        targetZ = heightFrom(m, pos, forwardOf(heading), pos.z, nearBy, reversing, true);
+        slope = (targetZ - pos.z) / nearBy;
+        pitch = glm::degrees(std::atan(slope));
+        if (reversing) pitch = -pitch;      // backing up, NPC_Move aims at the mirror image ahead
+    }
+
+    // Where a car sits on the ground under it, read at its wheels (a knocked car, which the ground
+    // itself carries): `z` its centre's height (its ride height over the ground, along its own up
+    // axis when tilted, never under the ground at its middle) and `pitch` (degrees, nose up
+    // positive) from the ground under its front and rear wheels. False where the ground is not known.
+    bool groundPose(const Mover& m, int model, const Vector2& c, float heading, float refZ, float& pitch, float& z)
+    {
+        // How high it sits: as it really sat when it was hit (a parked car's own height is its
+        // model's, as the game set it), else the ride height a driver holds (carZ).
+        const float ride = m.ride > 0.0f ? m.ride : m.carZ;
+        const float wheelbase = std::max(1.0f, drivingModel.handling(model).wheelbase);
+        const Vector2 f = forwardOf(heading);
+        float mid, front, rear;
+        if (!groundUnder(c.x, c.y, refZ - ride, mid)) return false;
+        const Vector2 fp = c + f * (wheelbase * 0.5f), rp = c - f * (wheelbase * 0.5f);
+        if (!groundUnder(fp.x, fp.y, mid, front) || !groundUnder(rp.x, rp.y, mid, rear)) return false;
+        pitch = std::clamp(glm::degrees(std::atan2(front - rear, wheelbase)), -60.0f, 60.0f);
+        const float chord = (front + rear) * 0.5f;
+        z = std::max(chord + ride / std::max(0.5f, std::cos(glm::radians(pitch))), mid + ride);
+        return true;
     }
 
     // A model's collision box: vehicles.dnv's (from its DFF), else open.mp's model table
@@ -2153,30 +2222,10 @@ public:
         // no path left to follow) the ground under it: a car never climbs onto something it
         // has no ground for, nor floats on at the height it was.
         auto heightAt = [&](float d) -> float {
-            const Vector2 at = Vector2(pos) + fwd * (m.reversing ? -d : d);
-            float z = pos.z, gz;
+            float z = pos.z;
             if (n >= 2 && !m.reversing)
                 z = along(m.points, m.seg, 0.0f, glm::distance(Vector2(m.points[m.seg]), Vector2(pos)) + d).z;
-            if (m.reversing) {
-                if (world_.loaded() && world_.ground(at.x, at.y, pos.z - m.carZ, COL_UP, COL_DOWN, gz)) return gz + m.carZ;
-                if (finder.groundAt(at.x, at.y, pos.z - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car)) return gz + m.carZ;
-                return pos.z;
-            }
-            if (m.drop && m.direct) return deckUnder(at.x, at.y, pos.z - m.carZ, gz) ? gz + m.carZ : pos.z;
-            if (m.chase && world_.loaded()) {
-                // Chasing, the ground ahead from no lower than the car's own level, and no
-                // steeper down than a bank: an edge on the way (a drop off a ledge the car
-                // mesh has, a kerb's lip) is driven at level, and offEdge tips it over once
-                // its middle is past, instead of it sinking into the deck short of it.
-                const float level = pos.z - m.carZ, from = std::max(z - m.carZ, level);
-                return world_.ground(at.x, at.y, from, COL_UP, from - level + d * BANK_SLOPE + 0.5f, gz) ? gz + m.carZ : pos.z;
-            }
-            if (world_.loaded() && world_.ground(at.x, at.y, z - m.carZ, COL_UP, COL_DOWN, gz))
-                return gz + m.carZ;     // the ground itself, wherever the car is going
-            if (m.ground && finder.groundAt(at.x, at.y, z - m.carZ, GROUND_REACH, gz, dnav::MeshKind::Car))
-                return gz + m.carZ;
-            if ((m.direct || n < 2) && groundUnder(at.x, at.y, z - m.carZ, gz)) return gz + m.carZ;
-            return z;
+            return heightFrom(m, pos, fwd, z, d, m.reversing, false);
         };
         ahead.z = pos.z + (heightAt(nearBy) - pos.z) * reach / nearBy;
         float moveSpeed = std::max(m.v, 0.5f) / SPEED_UNIT;
@@ -2618,6 +2667,19 @@ public:
         m.knockLast = now;
         m.heading = nt.heading;
         m.knockV = nt.vel;
+        // (Already lying on the slope it was driving on: no jump to flat and back.)
+        // And how high it sits over the ground, as it is now (square to the slope): that is this
+        // car's own ride height, wherever it came from, so no model scrapes or floats.
+        float p0, z0;
+        m.ride = 0.0f;
+        if (groundPose(m, nt.model, Vector2(nt.pos), nt.heading, nt.pos.z, p0, z0)) {
+            const float cosP = std::max(0.5f, std::cos(glm::radians(p0)));
+            const float measured = (nt.pos.z - (z0 - m.carZ / cosP)) * cosP;
+            if (measured > 0.25f && measured < 3.0f) m.ride = measured;
+            m.slopeP = p0;
+        } else {
+            m.slopeP = 0.0f;
+        }
     }
 
     // A knocked car is a hitter too, on its own slide. An NPC car of ours it runs into (parked,
@@ -2759,36 +2821,6 @@ public:
         return slot;
     }
 
-    // How the ground slopes under a car, along it and across it (degrees: nose up and banked
-    // left positive), from the ground under its four sides, and where its centre sits over
-    // that: its ride height straight up from the ground, so along the car's own up axis when
-    // it is tilted. False with no ground under any side (pitch and roll are then 0).
-    bool groundTilt(const Mover& m, IVehicle& car, const Vector3& pos, float heading, float& pitch, float& roll, float& centre)
-    {
-        pitch = 0.0f;
-        roll = 0.0f;
-        const Shape sh = shapeOf(car.getModel());
-        const Vector2 f = forwardOf(heading), r(f.y, -f.x), c(pos.x, pos.y);
-        const float base = pos.z - m.carZ;
-        float front, rear, right, left, sum = 0.0f;
-        int found = 0;
-        const Vector2 fp = c + f * sh.hl, rp = c - f * sh.hl, rgt = c + r * sh.hw, lft = c - r * sh.hw;
-        const bool hasFront = groundUnder(fp.x, fp.y, base, front), hasRear = groundUnder(rp.x, rp.y, base, rear);
-        const bool hasRight = groundUnder(rgt.x, rgt.y, base, right), hasLeft = groundUnder(lft.x, lft.y, base, left);
-        if (hasFront) { sum += front; found++; }
-        if (hasRear) { sum += rear; found++; }
-        if (hasRight) { sum += right; found++; }
-        if (hasLeft) { sum += left; found++; }
-        if (!found) return false;
-        if (hasFront && hasRear)
-            pitch = std::clamp(glm::degrees(std::atan2(front - rear, sh.hl * 2.0f)), -PHYS_SLOPE_MAX, PHYS_SLOPE_MAX);
-        if (hasRight && hasLeft)
-            roll = std::clamp(glm::degrees(std::atan2(right - left, sh.hw * 2.0f)), -PHYS_SLOPE_MAX, PHYS_SLOPE_MAX);
-        const float lean = std::max(0.5f, std::cos(glm::radians(pitch)) * std::cos(glm::radians(roll)));
-        centre = sum / static_cast<float>(found) + m.carZ / lean;
-        return true;
-    }
-
     // A knocked car slides on under friction, bounces off walls and rests; then drive() takes
     // over again from where it stopped.
     void knockStep(int npcid, Mover& m, TimePoint now)
@@ -2813,7 +2845,17 @@ public:
             m.pitchRate += PHYS_PITCH_GAIN * glm::dot(dv, f0);
             m.tiltRate += PHYS_ROLL_GAIN * glm::dot(dv, r0);
         }
-        dnav::roll(k, m.heading, dt, PHYS_ROLL_MU, PHYS_GRIP_MU);
+        // On a slope the ground pushes back square to itself: friction goes with that normal force
+        // (cos of the slope), and gravity pulls the car down the slope along its heading.
+        {
+            const float slopeRad = glm::radians(m.slopeP);
+            const float cosS = std::cos(slopeRad);
+            dnav::roll(k, m.heading, dt, PHYS_ROLL_MU * cosS, PHYS_GRIP_MU * cosS);
+            const Vector2 fs = forwardOf(m.heading);
+            const float down = -GRAVITY * std::sin(slopeRad) * cosS * dt;   // m/s along the heading (nose up: back)
+            k.vx += fs.x * down;
+            k.vy += fs.y * down;
+        }
         m.knockV = Vector2(k.vx, k.vy);
         m.pitchRate += (-PHYS_TILT_K * m.pitch - PHYS_TILT_C * m.pitchRate) * dt;
         m.tiltRate += (-PHYS_TILT_K * m.tilt - PHYS_TILT_C * m.tiltRate) * dt;
@@ -2845,17 +2887,32 @@ public:
         const Vector2 f = forwardOf(m.heading), r(f.y, -f.x);
         const Vector2 origin = Vector2(k.x, k.y) - r * sh.ox - f * sh.oy;
         const float speed = std::sqrt(k.vx * k.vx + k.vy * k.vy);
-        // Its height follows the ground (no falling off edges: it is flat physics), its centre
-        // its ride height over it, and its body leans with the slope.
-        float z = pos.z, gz, slopePitch, slopeRoll, centre;
-        const float lim = 0.4f + speed * dt * 0.8f;
-        if (groundTilt(m, *car, Vector3(origin.x, origin.y, pos.z), m.heading, slopePitch, slopeRoll, centre))
-            z = pos.z + std::clamp(centre - pos.z, -lim, lim);
-        else if (groundUnder(origin.x, origin.y, pos.z - m.carZ, gz))
-            z = pos.z + std::clamp(gz + m.carZ - pos.z, -lim, lim);
-        npc->setVelocity(Vector3(k.vx, k.vy, 0.0f) / VELOCITY_UNIT, false);
+        // On the ground, as a car on its wheels is: its height and pitch are read from the ground under
+        // its wheels every step (a lookahead that follows the ground lags: it sank into a hill it
+        // slid up and floated over the way down). Only a change of level (an edge) is rate limited.
+        // No roll from the ground; the hit's own spring wobble (m.pitch, m.tilt) goes on top.
+        float z = pos.z, slopePitch = m.slopeP, gp, gz;
+        if (groundPose(m, car->getModel(), Vector2(origin), m.heading, pos.z, gp, gz)) {
+            const float lim = 1.0f + speed * dt * 2.0f;
+            z = pos.z + std::clamp(gz - pos.z, -lim, lim);
+            m.slopeP += (gp - m.slopeP) * std::min(1.0f, dt * 15.0f);
+            slopePitch = m.slopeP;
+        } else {
+            // Ground not known under its wheels: as a driver reads it ahead.
+            const bool backing = k.vx * f.x + k.vy * f.y < 0.0f;
+            float slope, targetZ;
+            slopeLikeDriving(m, Vector3(origin.x, origin.y, pos.z), m.heading, backing, speed, slopePitch, slope, targetZ);
+            const float rise = targetZ - pos.z;
+            z = pos.z + std::clamp(slope * glm::length(move), std::min(0.0f, rise), std::max(0.0f, rise));
+            m.slopeP = slopePitch;
+        }
+        // Its velocity follows the slope too: along the ground, not flat (a flat one has the game push the
+        // car into a hill it slides up and off one it slides down between syncs).
+        const float alongHeading = k.vx * f.x + k.vy * f.y;
+        const float vz = std::clamp(alongHeading * std::tan(glm::radians(slopePitch)), -FALL_MAX, FALL_MAX);
+        npc->setVelocity(Vector3(k.vx, k.vy, vz) / VELOCITY_UNIT, false);
         npc->setVehiclePosition(Vector3(origin.x, origin.y, z), false);
-        npc->setVehicleRotation(GTAQuat(Vector3(m.pitch + slopePitch, m.tilt + slopeRoll, m.heading)), false);
+        npc->setVehicleRotation(GTAQuat(Vector3(m.pitch + slopePitch, m.tilt, m.heading)), false);
         if ((speed < PHYS_REST && std::fabs(k.yaw) < PHYS_REST_YAW && std::fabs(m.pitch) < PHYS_TILT_REST
                 && std::fabs(m.tilt) < PHYS_TILT_REST)
             || std::chrono::duration<float>(now - m.knockStart).count() > PHYS_MAX_SECS)
@@ -2871,9 +2928,12 @@ public:
         npc.setVelocity(Vector3(0.0f), false);
         if (m.parked) {
             // Nothing to drive on to: level, where it stopped, and the Mover goes (m with it).
-            float slopePitch = 0.0f, slopeRoll = 0.0f, centre;
-            if (IVehicle* car = npc.getVehicle()) groundTilt(m, *car, car->getPosition(), m.heading, slopePitch, slopeRoll, centre);
-            npc.setVehicleRotation(GTAQuat(Vector3(slopePitch, slopeRoll, m.heading)), false);
+            float slopePitch = 0.0f, rz;
+            if (IVehicle* car = npc.getVehicle()) {
+                const Vector3 at = car->getPosition();
+                if (!groundPose(m, car->getModel(), Vector2(at), m.heading, at.z, slopePitch, rz)) slopePitch = 0.0f;
+            }
+            npc.setVehicleRotation(GTAQuat(Vector3(slopePitch, 0.0f, m.heading)), false);
             const int id = m.npc;
             movers_.erase(id);
             return;
