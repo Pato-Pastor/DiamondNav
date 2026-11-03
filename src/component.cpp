@@ -1415,6 +1415,18 @@ public:
         return true;
     }
 
+    // A car sent driving while a hit has it sliding carries on at the speed and spin it has (along
+    // its own heading), instead of at what its drive was doing before the hit.
+    static bool carryKnock(Mover& m, const Mover& o, Vector3& slide)
+    {
+        if (!o.knocked) return false;
+        const Vector2 f = forwardOf(o.heading);
+        m.v = std::max(0.0f, o.knock.vx * f.x + o.knock.vy * f.y);
+        m.yawRate = glm::degrees(o.knock.yaw);
+        slide = Vector3(o.knock.vx, o.knock.vy, 0.0f) / VELOCITY_UNIT;
+        return true;
+    }
+
     // Starts a search for npc's walk or drive; true if it was queued.
     bool goTo(AMX* amx, int npcid, dnav::PathKind kind, const Vector3& to, NPCMoveType moveType, float speed,
         float carZ, const dnav::RouteOptions& road)
@@ -1435,6 +1447,8 @@ public:
         // stopping first: it keeps its speed and heading, and the search starts it on
         // the road ahead (weighing a turn round at that speed) instead of from a standstill.
         Mover m;
+        Vector3 slide(0.0f);
+        bool sliding = false;
         dnav::RouteOptions how = road;
         auto was = movers_.find(npcid);
         const bool keep = driving(kind) && was != movers_.end() && driving(was->second.kind) && was->second.rolling
@@ -1447,6 +1461,7 @@ public:
             m.yawRate = o.reversing ? 0.0f : o.yawRate;
             m.lastDrive = o.lastDrive;
             m.lastPos = o.lastPos;
+            sliding = carryKnock(m, o, slide);
             if (!how.hasHeading) {
                 how.hasHeading = true;
                 how.heading = o.heading;
@@ -1459,6 +1474,7 @@ public:
         const bool walkOn = !driving(kind) && was != movers_.end() && !driving(was->second.kind)
             && !was->second.request && was->second.next < was->second.points.size();
         end(npcid, END_STOPPED, !keep && !walkOn);
+        if (sliding) npc->setVelocity(slide, false);
         m.walkOn = walkOn;
         const Vector3 goal = driving(kind) ? to - Vector3(0.0f, 0.0f, carZ) : to - Vector3(0.0f, 0.0f, FOOT_Z);
         const int id = finder.request(amx, dnav::Point { from.x, from.y, from.z }, dnav::Point { goal.x, goal.y, goal.z },
@@ -2259,6 +2275,8 @@ public:
         // A car already driving somewhere gives chase at the speed it has: it does not
         // stop dead first (its first plan weighs turning round against carrying on).
         Mover m;
+        Vector3 slide(0.0f);
+        bool sliding = false;
         auto was = movers_.find(npcid);
         const bool keep = was != movers_.end() && driving(was->second.kind) && was->second.rolling
             && !was->second.airborne;
@@ -2270,8 +2288,10 @@ public:
             m.yawRate = o.reversing ? 0.0f : o.yawRate;
             m.lastDrive = o.lastDrive;
             m.lastPos = o.lastPos;
+            sliding = carryKnock(m, o, slide);
         }
         end(npcid, END_STOPPED, !keep);
+        if (sliding) npc->setVelocity(slide, false);
         m.npc = npcid;
         m.owner = amx;
         m.kind = dnav::PathKind::Drive;
