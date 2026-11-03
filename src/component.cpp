@@ -17,6 +17,7 @@
 #include <Server/Components/Vehicles/vehicle_models.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -240,6 +241,11 @@ constexpr float PHYS_MIN_HEALTH = 300.0f;   // a hit alone never takes it lower 
 constexpr float PHYS_SEPARATE = 1.5f;       // m/s: the fastest two cars left overlapping are pushed apart (a squeezed car never jumps)
 constexpr float PHYS_SLOP = 0.03f;          // m: an overlap this small is left alone
 constexpr float PHYS_HEIGHT = 1.4f;         // m: a vehicle's height when the model table has none (for its mass)
+constexpr float PHYS_DENT_MIN_KMH = 10.0f;  // a hit changing its speed less than this leaves no mark
+constexpr float PHYS_DENT_SIDE = 0.6f;      // a hit this far out across half its width (or more) is on its side
+constexpr float PHYS_DENT_END = 0.3f;       // ...and this far along half its length (or more), on its front or back
+constexpr float PHYS_DENT_GLASS_KMH = 45.0f;// a front hit changing its speed this much counts against the windscreen too
+constexpr int PHYS_DENT_HITS = 6;           // hits on one part that take it off (however hard each one was)
 
 bool driving(dnav::PathKind k)
 {
@@ -411,6 +417,64 @@ int cellOf(float f)
     int32_t c;
     std::memcpy(&c, &f, sizeof(c));
     return static_cast<int>(c);
+}
+
+// Hits taken so far by each part of a car: its seven panels (shift / 4), then bonnet, boot,
+// driver's door and passenger's door.
+using DentHits = std::array<uint8_t, 11>;
+
+// A damage field (mask wide, at shift) after one more hit on its part: the count goes up by one
+// whatever the force, and the state follows the count (first, then mid from half the hits that
+// take it off, then gone). Never lowered. A field found intact was repaired: the count restarts.
+int dentPart(int status, int shift, uint32_t mask, uint8_t& hits, uint32_t first, uint32_t mid, uint32_t gone)
+{
+    const uint32_t bits = static_cast<uint32_t>(status);
+    const uint32_t state = (bits >> shift) & mask;
+    if (state == 0) hits = 0;
+    if (hits < 255) hits++;
+    const uint32_t level = hits >= PHYS_DENT_HITS ? gone : hits >= PHYS_DENT_HITS / 2 ? mid : first;
+    if (level <= state) return status;
+    return static_cast<int>((bits & ~(mask << shift)) | (level << shift));
+}
+
+// Marks the car where it was hit (at, in the world; box is the car's): a hit on its side counts
+// against that door and the front or rear side panel, one at its front or back against the
+// bumper, hood or trunk and the nearer side panel there (the windscreen too when hard), and a
+// corner against both. dv is the m/s of speed the hit changed. Across is negative on the
+// driver's side (left-hand drive).
+void dent(IVehicle& car, const Box& box, const Vector2& at, float dv, DentHits& hits)
+{
+    const float kmh = dv * 3.6f;
+    if (kmh < PHYS_DENT_MIN_KMH) return;
+    const Vector2 d = at - box.c;
+    const float across = glm::dot(d, box.r), along = glm::dot(d, box.f);
+    const bool side = std::fabs(across) > box.hw * PHYS_DENT_SIDE;
+    const bool front = along > box.hl * PHYS_DENT_END;
+    const bool back = along < -box.hl * PHYS_DENT_END;
+    if (!side && !front && !back) return;
+    int panels, doors, lights, tyres;
+    car.getDamageStatus(panels, doors, lights, tyres);
+    auto panel = [&](int shift) { panels = dentPart(panels, shift, 0xF, hits[shift / 4], 1, 2, 3); };
+    auto door = [&](int shift) { doors = dentPart(doors, shift, 0xFF, hits[7 + shift / 8], 2, 2, 4); };
+    const bool left = across < 0.0f;
+    const int wing = left ? 0 : 4;
+    const int quarter = left ? 8 : 12;
+    if (side) {
+        door(left ? 16 : 24);
+        panel(along >= 0.0f ? wing : quarter);
+    }
+    if (front) {
+        panel(20);
+        panel(wing);
+        door(0);
+        if (kmh >= PHYS_DENT_GLASS_KMH) panel(16);
+    }
+    if (back) {
+        panel(24);
+        panel(quarter);
+        door(8);
+    }
+    car.setDamageStatus(panels, doors, lights, tyres);
 }
 
 // An NPC flying a helicopter (Nav_FlyTo, or Nav_Chase in one).
@@ -2507,6 +2571,7 @@ public:
                 const float dv = j / a.mass;                // m/s of speed the hit changed
                 if (car->getHealth() > PHYS_MIN_HEALTH)
                     car->setHealth(std::max(PHYS_MIN_HEALTH, car->getHealth() - dv * PHYS_DAMAGE));
+                dent(*car, nb, Vector2(c.px, c.py), dv, dents_[car->getID()]);
                 reports.push_back({ tg.npc, ht.id, m.owner, dv * 3.6f, c.px, c.py, nt.pos.z });
             }
         }
@@ -2633,6 +2698,7 @@ public:
                 km.knock.y = kAt.y - c.ny * push * share;
                 if (jk > 0.0f) {
                     hurt(*kcar, jk / kb.mass);
+                    dent(*kcar, kbox, Vector2(c.px, c.py), jk / kb.mass, dents_[kcar->getID()]);
                     reports.push_back({ o->second, ot.id, km.owner, jk / kb.mass * 3.6f, c.px, c.py, kt.pos.z });
                 }
                 if (!pushO) continue;
@@ -2646,6 +2712,7 @@ public:
                 if (jo > 0.0f) {
                     om.hitUntil = now + PHYS_COOLDOWN;
                     hurt(*ocar, jo / other.mass);
+                    dent(*ocar, ob, Vector2(c.px, c.py), jo / other.mass, dents_[ocar->getID()]);
                     reports.push_back({ tg->npc, kt.id, om.owner, jo / other.mass * 3.6f, c.px, c.py, ot.pos.z });
                 }
             }
@@ -3214,6 +3281,7 @@ private:
     std::unordered_map<int, void*> owners_;     // npc id -> the script whose drive it last ended (hears of a hit on it parked)
     std::unordered_map<int, int> byRequest_;    // request id -> npc id
     std::unordered_map<int, std::deque<Sample>> history_;   // Nav_SetPhysics: a hitter's last velocities, by vehicle
+    std::unordered_map<int, DentHits> dents_;               // Nav_SetPhysics: the hits each NPC car's parts have taken, by vehicle
     std::unordered_map<int, float> heights_;    // model -> its height (for its mass)
 };
 
