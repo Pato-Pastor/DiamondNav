@@ -288,3 +288,5 @@ forward OnNavMoveEnd(npcid, reason);
 // The car is already thrown and has lost health to the hit (never below 300); this is
 // where a script adds driver damage, a driver bailing out and so on.
 forward OnNavVehicleHit(npcid, vehicleid, Float:kmh, Float:x, Float:y, Float:z);
+
+forward OnNavVehicleHit(npcid, vehicleid, Float:kmh, Float:x, Float:y, Float:z);

@@ -1634,6 +1634,22 @@ public:
         if (npc && npc->getVehicle() && !m.points.empty()) planSpeeds(m, *npc->getVehicle());
     }
 
+    // Nav_SetVehicleSpeed: the speed (m/s) the drive it is on goes for, as if Nav_DriveTo had been
+    // given it. Only the speed plan is redone: the path, and where the car is on it, stay as they
+    // are, and drive() eases the car there with its own acceleration and brakes. 0 or less goes
+    // back to the road's own speed.
+    bool setSpeed(int npcid, float speed)
+    {
+        auto it = movers_.find(npcid);
+        if (it == movers_.end() || !driving(it->second.kind) || it->second.parked) return false;
+        Mover& m = it->second;
+        m.speed = speed > 0.0f ? speed / SPEED_UNIT : NPC_MOVE_SPEED_AUTO;
+        // (Still waiting on its path: setDrivePath plans with the new speed when it arrives.)
+        INPC* npc = npcs_ ? npcs_->get(npcid) : nullptr;
+        if (npc && npc->getVehicle() && !m.points.empty()) planSpeeds(m, *npc->getVehicle());
+        return true;
+    }
+
     // A rescan of every driver's plan: speed limits or a model's handling changed.
     void replanAll()
     {
@@ -3547,6 +3563,11 @@ SCRIPT_API(Nav_SetDriveStyle, bool(int npcid, int style))
     if (!DiamondNav::instance || style < -1 || style >= static_cast<int>(dnav::DriveStyle::Count)) return false;
     DiamondNav::instance->setStyle(npcid, style);
     return true;
+}
+
+SCRIPT_API(Nav_SetVehicleSpeed, bool(int npcid, float kmh))
+{
+    return DiamondNav::instance && DiamondNav::instance->setSpeed(npcid, kmh / KMH);
 }
 
 SCRIPT_API(Nav_GetDriveStyle, int(int npcid))
