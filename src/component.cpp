@@ -62,6 +62,8 @@ constexpr float TURN_MIN_SPEED = 3.0f;  // never slower than this while it still
 constexpr float LOOK_MIN = 4.0f;        // how far down the path it aims: 4 m at a crawl...
 constexpr float LOOK_TIME = 0.6f;       // ...plus 0.6 s of travel
 constexpr float LOOK_MAX = 24.0f;
+constexpr float LOOK_GROW = 12.0f;      // m/s: a look shortened for a corner grows back no faster than this, so the aim does not jump
+constexpr float LOOK_CUT = 0.8f;        // m: the straight line to its aim may stray this far from the path before the look is shortened
 constexpr float PASSED_CORNER = 3.0f;   // still this near the point it passed, it keeps that point's speed
 constexpr float SCAN_EXTRA = 20.0f;     // looks for slower points this far past its braking distance
 constexpr float AHEAD_TIME = 0.5f;      // NPC_Move's target: this far ahead of the car
@@ -332,6 +334,7 @@ struct Mover {
     bool seen = false;                  // tvel has a value
     bool walled = false;                // drive(): a wall is in the way and there is no way round it
     float wallHold = 0.0f;              // s left before a straight run is tried again
+    float cutLook = 0.0f;               // the look drive() used last, after shortening it for a corner (0: none yet)
     float avoidDt = 1.0f;               // s since avoid() last looked
     bool avoidHasTurn = false;          // ...and what it decided: a swerve,
     float avoidTurn = 0.0f;
@@ -1916,6 +1919,37 @@ public:
                     look = std::max(least, look * 0.5f);
                     aim = along(m.points, best, bestT, look);
                 }
+            }
+            // A look longer than a corner is a chord across it: shortened until the line to the aim keeps to the path.
+            // (Solved for the longest look that does, and eased back out, so the aim moves smoothly instead of jumping.)
+            if (!m.onLedge) {
+                auto strayAt = [&](float l) {
+                    const Vector2 from(pos), chord = Vector2(along(m.points, best, bestT, l)) - from;
+                    const float chordLen = glm::length(chord);
+                    if (chordLen < 1e-3f) return 0.0f;
+                    const Vector2 side(-chord.y / chordLen, chord.x / chordLen);
+                    float stray = 0.0f;
+                    for (size_t k = best + 1; k + 1 < n && m.cum[k] - here < l; k++)
+                        stray = std::max(stray, std::fabs(glm::dot(Vector2(m.points[k]) - from, side)));
+                    return stray;
+                };
+                if (look > LOOK_MIN && strayAt(look) > LOOK_CUT) {
+                    float lo = LOOK_MIN, hi = look;
+                    if (strayAt(lo) > LOOK_CUT) {
+                        hi = lo;
+                    } else {
+                        for (int step = 0; step < 6; step++) {
+                            const float mid = (lo + hi) * 0.5f;
+                            if (strayAt(mid) > LOOK_CUT) hi = mid;
+                            else lo = mid;
+                        }
+                    }
+                    look = lo;
+                }
+                if (m.cutLook > 0.0f) look = std::min(look, m.cutLook + LOOK_GROW * dt);
+                look = std::max(look, LOOK_MIN);
+                m.cutLook = look;
+                aim = along(m.points, best, bestT, look);
             }
             const float want = glm::degrees(std::atan2(-(aim.x - pos.x), aim.y - pos.y));
             error = wrap180(want - m.heading);
